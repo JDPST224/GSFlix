@@ -1,0 +1,902 @@
+package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"movie/internal/config"
+	"movie/internal/mediaresolver"
+)
+
+var mediaSourceResolver *mediaresolver.Resolver
+
+type Movie struct {
+	ID          string   `json:"id"`
+	Title       string   `json:"title"`
+	Description string   `json:"description"`
+	Banner      string   `json:"banner"`
+	Thumbnail   string   `json:"thumbnail"`
+	Categories  []string `json:"categories"`
+	Type        string   `json:"type"` // "movie" or "tv"
+	Rating      float64  `json:"rating"`
+	Year        string   `json:"year"`
+	Genres      []string `json:"genres"`
+}
+
+type TMDBResponse struct {
+	Results       []TMDBMovie `json:"results"`
+	StatusMessage string      `json:"status_message"`
+}
+
+type TMDBMovie struct {
+	ID            int     `json:"id"`
+	Title         string  `json:"title"`
+	OriginalTitle string  `json:"original_title"`
+	Name          string  `json:"name"` // For TV shows
+	Overview      string  `json:"overview"`
+	BackdropPath  string  `json:"backdrop_path"`
+	PosterPath    string  `json:"poster_path"`
+	VoteAverage   float64 `json:"vote_average"`
+	ReleaseDate   string  `json:"release_date"`
+	FirstAirDate  string  `json:"first_air_date"`
+	GenreIDs      []int   `json:"genre_ids"`
+}
+
+// ── Detail / Episode Structs ─────────────────────────────────────────────────
+
+type DetailResponse struct {
+	ID              int            `json:"id"`
+	Title           string         `json:"title"`
+	Tagline         string         `json:"tagline"`
+	Overview        string         `json:"overview"`
+	VoteAverage     float64        `json:"vote_average"`
+	ReleaseDate     string         `json:"release_date"`
+	FirstAirDate    string         `json:"first_air_date"`
+	Runtime         int            `json:"runtime"`
+	NumberOfSeasons int            `json:"number_of_seasons"`
+	Genres          []TMDBGenre    `json:"genres"`
+	BackdropPath    string         `json:"backdrop_path"`
+	PosterPath      string         `json:"poster_path"`
+	Credits         TMDBCredits    `json:"credits"`
+	Videos          TMDBVideos     `json:"videos"`
+	Recommendations TMDBRecommends `json:"recommendations"`
+	Seasons         []TMDBSeason   `json:"seasons"`
+}
+
+type TMDBGenre struct {
+	ID   int    `json:"id"`
+	Name string `json:"name"`
+}
+
+type TMDBCredits struct {
+	Cast []TMDBCastMember `json:"cast"`
+}
+
+type TMDBCastMember struct {
+	Name        string `json:"name"`
+	Character   string `json:"character"`
+	ProfilePath string `json:"profile_path"`
+	Order       int    `json:"order"`
+}
+
+type TMDBVideos struct {
+	Results []TMDBVideo `json:"results"`
+}
+
+type TMDBVideo struct {
+	Key      string `json:"key"`
+	Site     string `json:"site"`
+	Type     string `json:"type"`
+	Official bool   `json:"official"`
+}
+
+type TMDBRecommends struct {
+	Results []TMDBMovie `json:"results"`
+}
+
+type TMDBSeason struct {
+	SeasonNumber int    `json:"season_number"`
+	Name         string `json:"name"`
+	EpisodeCount int    `json:"episode_count"`
+	PosterPath   string `json:"poster_path"`
+}
+
+type SeasonResponse struct {
+	Episodes []TMDBEpisode `json:"episodes"`
+}
+
+type TMDBEpisode struct {
+	EpisodeNumber int     `json:"episode_number"`
+	Name          string  `json:"name"`
+	Overview      string  `json:"overview"`
+	StillPath     string  `json:"still_path"`
+	Runtime       int     `json:"runtime"`
+	VoteAverage   float64 `json:"vote_average"`
+	AirDate       string  `json:"air_date"`
+}
+
+var tmdbGenres = map[int]string{
+	28: "Action", 12: "Adventure", 16: "Animation", 35: "Comedy", 80: "Crime", 99: "Documentary", 18: "Drama", 10751: "Family", 14: "Fantasy", 36: "History", 27: "Horror", 10402: "Music", 9648: "Mystery", 10749: "Romance", 878: "Science Fiction", 10770: "TV Movie", 53: "Thriller", 10752: "War", 37: "Western",
+	10759: "Action & Adventure", 10762: "Kids", 10763: "News", 10764: "Reality", 10765: "Sci-Fi & Fantasy", 10766: "Soap", 10767: "Talk", 10768: "War & Politics",
+}
+
+var cachedMovies []Movie
+var cachedTVShows []Movie
+var cachedPopular []Movie
+var cacheMutex sync.RWMutex
+var tvMutex sync.RWMutex
+var popularMutex sync.RWMutex
+var tmdbToken string  // Bearer Read Access Token
+var tmdbAPIKey string // v3 API key (fallback)
+
+func loadConfig(path string) error {
+	file, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if len(line) == 0 || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			key := strings.TrimSpace(parts[0])
+			val := strings.TrimSpace(parts[1])
+			switch key {
+			case "TMDB_ACCESS_TOKEN":
+				tmdbToken = val
+			case "TMDB_API_KEY":
+				tmdbAPIKey = val
+			}
+		}
+	}
+	return scanner.Err()
+}
+
+func buildURL(endpoint string) string {
+	if tmdbAPIKey != "" && tmdbToken == "" {
+		sep := "?"
+		if strings.Contains(endpoint, "?") {
+			sep = "&"
+		}
+		return "https://api.themoviedb.org/3" + endpoint + sep + "api_key=" + tmdbAPIKey
+	}
+	return "https://api.themoviedb.org/3" + endpoint
+}
+
+func fetchTMDB(endpoint string, categories []string, mediaType string) []Movie {
+	if tmdbToken == "" && tmdbAPIKey == "" {
+		log.Println("No TMDB credentials, skipping fetch for", endpoint)
+		return nil
+	}
+
+	url := buildURL(endpoint)
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		log.Println("Error creating request:", err)
+		return nil
+	}
+
+	req.Header.Add("accept", "application/json")
+	if tmdbToken != "" {
+		req.Header.Add("Authorization", "Bearer "+tmdbToken)
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	res, err := client.Do(req)
+	if err != nil {
+		log.Println("Error fetching TMDB data:", err)
+		return nil
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		log.Println("Error reading response body:", err)
+		return nil
+	}
+
+	if res.StatusCode != http.StatusOK {
+		log.Printf("TMDB API error for %s: status=%d body=%s\n", endpoint, res.StatusCode, string(body))
+		return nil
+	}
+
+	var tmdbRes TMDBResponse
+	if err := json.Unmarshal(body, &tmdbRes); err != nil {
+		log.Println("Error unmarshaling TMDB JSON:", err)
+		return nil
+	}
+
+	if tmdbRes.StatusMessage != "" {
+		log.Printf("TMDB status message for %s: %s\n", endpoint, tmdbRes.StatusMessage)
+	}
+
+	var movies []Movie
+	for _, m := range tmdbRes.Results {
+		title := m.Title
+		if title == "" {
+			title = m.OriginalTitle
+		}
+		if title == "" {
+			title = m.Name
+		}
+
+		if title == "" || m.PosterPath == "" {
+			continue
+		}
+
+		banner := ""
+		if m.BackdropPath != "" {
+			banner = "https://image.tmdb.org/t/p/original" + m.BackdropPath
+		} else {
+			banner = "https://image.tmdb.org/t/p/w1280" + m.PosterPath
+		}
+
+		thumbnail := "https://image.tmdb.org/t/p/w500" + m.PosterPath
+
+		var genres []string
+		for _, gid := range m.GenreIDs {
+			if name, ok := tmdbGenres[gid]; ok {
+				genres = append(genres, name)
+			}
+		}
+
+		year := ""
+		if m.ReleaseDate != "" && len(m.ReleaseDate) >= 4 {
+			year = m.ReleaseDate[:4]
+		} else if m.FirstAirDate != "" && len(m.FirstAirDate) >= 4 {
+			year = m.FirstAirDate[:4]
+		}
+
+		movies = append(movies, Movie{
+			ID:          fmt.Sprintf("%d", m.ID),
+			Title:       title,
+			Description: m.Overview,
+			Banner:      banner,
+			Thumbnail:   thumbnail,
+			Categories:  categories,
+			Type:        mediaType,
+			Rating:      m.VoteAverage,
+			Year:        year,
+			Genres:      genres,
+		})
+	}
+
+	log.Printf("Fetched %d items for %v (%s)\n", len(movies), categories, mediaType)
+	return movies
+}
+
+func updateMoviesCache() {
+	log.Println("Refreshing movies cache...")
+	var allMovies []Movie
+
+	type task struct {
+		endpoint   string
+		categories []string
+	}
+
+	tasks := []task{
+		{"/trending/movie/day?language=en-US", []string{"Trending Now"}},
+		{"/movie/popular?language=en-US&page=1", []string{"Popular"}},
+		{"/movie/top_rated?language=en-US&page=1", []string{"Top Rated"}},
+		{"/movie/now_playing?language=en-US&page=1", []string{"Now Playing"}},
+		{"/movie/upcoming?language=en-US&page=1", []string{"Upcoming"}},
+		{"/discover/movie?with_genres=28&language=en-US&page=1&sort_by=popularity.desc", []string{"Action"}},
+		{"/discover/movie?with_genres=35&language=en-US&page=1&sort_by=popularity.desc", []string{"Comedy"}},
+		{"/discover/movie?with_genres=27&language=en-US&page=1&sort_by=popularity.desc", []string{"Horror"}},
+		{"/discover/movie?with_genres=878&language=en-US&page=1&sort_by=popularity.desc", []string{"Sci-Fi"}},
+		{"/discover/movie?with_genres=10749&language=en-US&page=1&sort_by=popularity.desc", []string{"Romance"}},
+		{"/discover/movie?with_genres=16&language=en-US&page=1&sort_by=popularity.desc", []string{"Animation"}},
+	}
+
+	for _, t := range tasks {
+		movies := fetchTMDB(t.endpoint, t.categories, "movie")
+		allMovies = append(allMovies, movies...)
+	}
+
+	cacheMutex.Lock()
+	if len(allMovies) > 0 {
+		cachedMovies = allMovies
+		log.Printf("Movies cache updated: %d total\n", len(allMovies))
+	} else {
+		log.Println("Warning: movie fetch returned 0 movies, keeping old cache")
+	}
+	cacheMutex.Unlock()
+}
+
+func updateTVShowsCache() {
+	log.Println("Refreshing TV shows cache...")
+	var allShows []Movie
+
+	type task struct {
+		endpoint   string
+		categories []string
+	}
+
+	tasks := []task{
+		{"/trending/tv/day?language=en-US", []string{"Trending TV"}},
+		{"/tv/popular?language=en-US&page=1", []string{"Popular Shows"}},
+		{"/tv/top_rated?language=en-US&page=1", []string{"Top Rated Shows"}},
+		{"/tv/on_the_air?language=en-US&page=1", []string{"Now Airing"}},
+		{"/discover/tv?with_genres=10759&language=en-US&page=1&sort_by=popularity.desc", []string{"Action & Adventure"}},
+		{"/discover/tv?with_genres=18&language=en-US&page=1&sort_by=popularity.desc", []string{"Drama"}},
+		{"/discover/tv?with_genres=35&language=en-US&page=1&sort_by=popularity.desc", []string{"Comedy Shows"}},
+		{"/discover/tv?with_genres=9648&language=en-US&page=1&sort_by=popularity.desc", []string{"Mystery"}},
+		{"/discover/tv?with_genres=10765&language=en-US&page=1&sort_by=popularity.desc", []string{"Sci-Fi & Fantasy"}},
+		{"/discover/tv?with_genres=16&language=en-US&page=1&sort_by=popularity.desc", []string{"Anime"}},
+	}
+
+	for _, t := range tasks {
+		shows := fetchTMDB(t.endpoint, t.categories, "tv")
+		allShows = append(allShows, shows...)
+	}
+
+	tvMutex.Lock()
+	if len(allShows) > 0 {
+		cachedTVShows = allShows
+		log.Printf("TV shows cache updated: %d total\n", len(allShows))
+	} else {
+		log.Println("Warning: TV fetch returned 0 shows, keeping old cache")
+	}
+	tvMutex.Unlock()
+}
+
+func updatePopularCache() {
+	log.Println("Refreshing popular/new cache...")
+	var all []Movie
+
+	// Mix of trending movies + trending TV for "New & Popular"
+	movies := fetchTMDB("/trending/movie/week?language=en-US", []string{"Trending Movies"}, "movie")
+	tv := fetchTMDB("/trending/tv/week?language=en-US", []string{"Trending Shows"}, "tv")
+	newMovies := fetchTMDB("/movie/now_playing?language=en-US&page=1", []string{"New in Cinemas"}, "movie")
+	newTV := fetchTMDB("/tv/on_the_air?language=en-US&page=1", []string{"New Episodes"}, "tv")
+
+	all = append(all, movies...)
+	all = append(all, tv...)
+	all = append(all, newMovies...)
+	all = append(all, newTV...)
+
+	popularMutex.Lock()
+	if len(all) > 0 {
+		cachedPopular = all
+		log.Printf("Popular cache updated: %d total\n", len(all))
+	}
+	popularMutex.Unlock()
+}
+
+// ── Dynamic media source resolver ───────────────────────────────────────────
+func mediaMovieSourceHandler(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/api/media/source/movie/")
+	if !validMediaID(id) {
+		writeMediaError(w, http.StatusBadRequest, "Invalid movie ID")
+		return
+	}
+	source, err := mediaSourceResolver.Resolve(r.Context(), mediaresolver.MediaRequest{Type: mediaresolver.Movie, ID: id})
+	if err != nil {
+		log.Printf("[MediaResolver] movie resolution failed id=%s error=%v", id, err)
+		writeMediaError(w, http.StatusBadGateway, "Unable to resolve media source")
+		return
+	}
+	writeMediaJSON(w, http.StatusOK, map[string]any{"success": true, "type": "hls", "url": source})
+}
+
+func mediaTVSourceHandler(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(r.URL.Path[len("/api/media/source/tv/"):], "/"), "/")
+	if len(parts) != 3 || !validMediaID(parts[0]) || !validMediaID(parts[1]) || !validMediaID(parts[2]) {
+		writeMediaError(w, http.StatusBadRequest, "Invalid TV episode parameters")
+		return
+	}
+	source, err := mediaSourceResolver.Resolve(r.Context(), mediaresolver.MediaRequest{Type: mediaresolver.TV, ID: parts[0], Season: parts[1], Episode: parts[2]})
+	if err != nil {
+		log.Printf("[MediaResolver] TV resolution failed id=%s season=%s episode=%s error=%v", parts[0], parts[1], parts[2], err)
+		writeMediaError(w, http.StatusBadGateway, "Unable to resolve media source")
+		return
+	}
+	writeMediaJSON(w, http.StatusOK, map[string]any{"success": true, "type": "hls", "url": source})
+}
+
+func validMediaID(s string) bool {
+	if s == "" || len(s) > 20 {
+		return false
+	}
+	for _, c := range s {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func writeMediaJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+
+func writeMediaError(w http.ResponseWriter, status int, message string) {
+	writeMediaJSON(w, status, map[string]any{"success": false, "error": message})
+}
+
+// ── Handlers ────────────────────────────────────────────────────────────────
+
+func moviesHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	cacheMutex.RLock()
+	movies := cachedMovies
+	cacheMutex.RUnlock()
+	if movies == nil {
+		movies = []Movie{}
+	}
+	json.NewEncoder(w).Encode(movies)
+}
+
+func tvShowsHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	tvMutex.RLock()
+	shows := cachedTVShows
+	tvMutex.RUnlock()
+	if shows == nil {
+		shows = []Movie{}
+	}
+	json.NewEncoder(w).Encode(shows)
+}
+
+func popularHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	popularMutex.RLock()
+	pop := cachedPopular
+	popularMutex.RUnlock()
+	if pop == nil {
+		pop = []Movie{}
+	}
+	json.NewEncoder(w).Encode(pop)
+}
+
+func homeHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	cacheMutex.RLock()
+	movies := cachedMovies
+	cacheMutex.RUnlock()
+
+	tvMutex.RLock()
+	shows := cachedTVShows
+	tvMutex.RUnlock()
+
+	// Build a combined home feed:
+	// Pull the first page of each source and tag them with home-friendly category names.
+	type categoryOrder struct {
+		cat   string
+		type_ string
+	}
+
+	// Collect movies by category
+	moviesBycat := map[string][]Movie{}
+	for _, m := range movies {
+		for _, c := range m.Categories {
+			moviesBycat[c] = append(moviesBycat[c], m)
+		}
+	}
+
+	// Collect TV by category
+	tvBycat := map[string][]Movie{}
+	for _, m := range shows {
+		for _, c := range m.Categories {
+			tvBycat[c] = append(tvBycat[c], m)
+		}
+	}
+
+	// Interleave: trending movies, trending TV, popular movies, popular TV, then genres
+	order := []struct{ cat, src string }{
+		{"Trending Movies", "movie"},
+		{"Trending TV", "tv"},
+		{"Popular Movies", "movie"},
+		{"Popular Shows", "tv"},
+		{"Top Rated Movies", "movie"},
+		{"Top Rated Shows", "tv"},
+		{"Now Playing", "movie"},
+		{"Now Airing", "tv"},
+		{"Upcoming", "movie"},
+		{"Action", "movie"},
+		{"Action & Adventure", "tv"},
+		{"Comedy", "movie"},
+		{"Comedy Shows", "tv"},
+		{"Horror", "movie"},
+		{"Sci-Fi", "movie"},
+		{"Sci-Fi & Fantasy", "tv"},
+		{"Drama", "tv"},
+		{"Mystery", "tv"},
+		{"Romance", "movie"},
+		{"Animation", "movie"},
+		{"Anime", "tv"},
+	}
+
+	// Rename "Trending Now" -> "Trending Movies" and "Trending TV" -> "Trending TV"
+	if items, ok := moviesBycat["Trending Now"]; ok {
+		moviesBycat["Trending Movies"] = append(moviesBycat["Trending Movies"], items...)
+	}
+	if items, ok := tvBycat["Trending TV"]; ok {
+		tvBycat["Trending TV"] = items
+	}
+
+	var combined []Movie
+	seen := map[string]bool{}
+
+	for _, o := range order {
+		var src map[string][]Movie
+		if o.src == "movie" {
+			src = moviesBycat
+		} else {
+			src = tvBycat
+		}
+		for _, m := range src[o.cat] {
+			key := m.Type + "-" + m.ID
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			// Re-label with the home category name
+			m.Categories = []string{o.cat}
+			combined = append(combined, m)
+		}
+	}
+
+	if combined == nil {
+		combined = []Movie{}
+	}
+	json.NewEncoder(w).Encode(combined)
+}
+
+func searchHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if tmdbToken == "" && tmdbAPIKey == "" {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode([]Movie{})
+		return
+	}
+
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	mediaType := strings.TrimSpace(r.URL.Query().Get("type")) // "movie", "tv", or "" (multi)
+
+	if query == "" {
+		json.NewEncoder(w).Encode([]Movie{})
+		return
+	}
+
+	encoded := url.QueryEscape(query)
+	var results []Movie
+
+	switch mediaType {
+	case "tv":
+		results = fetchTMDB("/search/tv?query="+encoded+"&language=en-US&page=1", []string{"Search"}, "tv")
+	case "movie":
+		results = fetchTMDB("/search/movie?query="+encoded+"&language=en-US&page=1", []string{"Search"}, "movie")
+	default:
+		// multi search — returns both movies and TV; map type from TMDB's media_type field
+		results = fetchMultiSearch(encoded)
+	}
+
+	if results == nil {
+		results = []Movie{}
+	}
+	json.NewEncoder(w).Encode(results)
+}
+
+// fetchMultiSearch hits /search/multi and returns movies + TV shows
+func fetchMultiSearch(encodedQuery string) []Movie {
+	if tmdbToken == "" && tmdbAPIKey == "" {
+		return nil
+	}
+
+	endpoint := "/search/multi?query=" + encodedQuery + "&language=en-US&page=1"
+	rawURL := buildURL(endpoint)
+
+	req, err := http.NewRequest("GET", rawURL, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Add("accept", "application/json")
+	if tmdbToken != "" {
+		req.Header.Add("Authorization", "Bearer "+tmdbToken)
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	res, err := client.Do(req)
+	if err != nil {
+		return nil
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil
+	}
+	if res.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	// multi search returns a "media_type" field per result
+	var raw struct {
+		Results []struct {
+			ID           int     `json:"id"`
+			Title        string  `json:"title"`
+			Name         string  `json:"name"`
+			Overview     string  `json:"overview"`
+			BackdropPath string  `json:"backdrop_path"`
+			PosterPath   string  `json:"poster_path"`
+			MediaType    string  `json:"media_type"`
+			VoteAverage  float64 `json:"vote_average"`
+			ReleaseDate  string  `json:"release_date"`
+			FirstAirDate string  `json:"first_air_date"`
+			GenreIDs     []int   `json:"genre_ids"`
+		} `json:"results"`
+	}
+
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil
+	}
+
+	var movies []Movie
+	for _, m := range raw.Results {
+		if m.MediaType != "movie" && m.MediaType != "tv" {
+			continue
+		}
+		title := m.Title
+		if title == "" {
+			title = m.Name
+		}
+		if title == "" || m.PosterPath == "" {
+			continue
+		}
+		banner := ""
+		if m.BackdropPath != "" {
+			banner = "https://image.tmdb.org/t/p/original" + m.BackdropPath
+		} else {
+			banner = "https://image.tmdb.org/t/p/w1280" + m.PosterPath
+		}
+
+		var genres []string
+		for _, gid := range m.GenreIDs {
+			if name, ok := tmdbGenres[gid]; ok {
+				genres = append(genres, name)
+			}
+		}
+
+		year := ""
+		if m.ReleaseDate != "" && len(m.ReleaseDate) >= 4 {
+			year = m.ReleaseDate[:4]
+		} else if m.FirstAirDate != "" && len(m.FirstAirDate) >= 4 {
+			year = m.FirstAirDate[:4]
+		}
+
+		movies = append(movies, Movie{
+			ID:          fmt.Sprintf("%d", m.ID),
+			Title:       title,
+			Description: m.Overview,
+			Banner:      banner,
+			Thumbnail:   "https://image.tmdb.org/t/p/w500" + m.PosterPath,
+			Categories:  []string{"Search Results"},
+			Type:        m.MediaType,
+			Rating:      m.VoteAverage,
+			Year:        year,
+			Genres:      genres,
+		})
+	}
+	return movies
+}
+
+// ── Detail Handler ──────────────────────────────────────────────────────────
+
+func detailHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if tmdbToken == "" && tmdbAPIKey == "" {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{}`))
+		return
+	}
+
+	mediaType := strings.TrimSpace(r.URL.Query().Get("type"))
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+
+	if id == "" || (mediaType != "movie" && mediaType != "tv") {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{}`))
+		return
+	}
+
+	append := func(base, extra string) string {
+		if strings.Contains(base, "?") {
+			return base + "&" + extra
+		}
+		return base + "?" + extra
+	}
+
+	var endpoint string
+	if mediaType == "movie" {
+		endpoint = fmt.Sprintf("/movie/%s", id)
+	} else {
+		endpoint = fmt.Sprintf("/tv/%s", id)
+	}
+
+	rawURL := buildURL(endpoint)
+	rawURL = append(rawURL, "append_to_response=credits,videos,recommendations")
+	rawURL = append(rawURL, "language=en-US")
+
+	req, err := http.NewRequest("GET", rawURL, nil)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{}`))
+		return
+	}
+	req.Header.Add("accept", "application/json")
+	if tmdbToken != "" {
+		req.Header.Add("Authorization", "Bearer "+tmdbToken)
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	res, err := client.Do(req)
+	if err != nil || res.StatusCode != http.StatusOK {
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte(`{}`))
+		if res != nil {
+			res.Body.Close()
+		}
+		return
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{}`))
+		return
+	}
+
+	w.Write(body)
+}
+
+// ── Episodes Handler ─────────────────────────────────────────────────────────
+
+func episodesHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	if tmdbToken == "" && tmdbAPIKey == "" {
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{}`))
+		return
+	}
+
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	season := strings.TrimSpace(r.URL.Query().Get("season"))
+	if id == "" || season == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(`{}`))
+		return
+	}
+
+	endpoint := fmt.Sprintf("/tv/%s/season/%s?language=en-US", id, season)
+	rawURL := buildURL(endpoint)
+
+	req, err := http.NewRequest("GET", rawURL, nil)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{}`))
+		return
+	}
+	req.Header.Add("accept", "application/json")
+	if tmdbToken != "" {
+		req.Header.Add("Authorization", "Bearer "+tmdbToken)
+	}
+
+	client := &http.Client{Timeout: 15 * time.Second}
+	res, err := client.Do(req)
+	if err != nil || res.StatusCode != http.StatusOK {
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte(`{}`))
+		if res != nil {
+			res.Body.Close()
+		}
+		return
+	}
+	defer res.Body.Close()
+
+	body, err := io.ReadAll(res.Body)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{}`))
+		return
+	}
+
+	w.Write(body)
+}
+
+func main() {
+	cfg := config.Load()
+	var resolverErr error
+	mediaSourceResolver, resolverErr = mediaresolver.New(cfg)
+	if resolverErr != nil {
+		log.Fatal("Failed to initialize media source resolver: ", resolverErr)
+	}
+	defer mediaSourceResolver.Close()
+
+	err := loadConfig("config.conf")
+	if err != nil {
+		log.Println("Warning: Could not load config.conf:", err)
+	}
+
+	if tmdbToken == "" && tmdbAPIKey == "" {
+		log.Println("WARNING: No TMDB credentials in config.conf")
+		log.Println("Set TMDB_ACCESS_TOKEN (Bearer token) or TMDB_API_KEY")
+	} else {
+		if tmdbToken != "" {
+			log.Println("Using TMDB Bearer access token")
+		} else {
+			log.Println("Using TMDB API key")
+		}
+
+		// Initial fetch (all caches in parallel)
+		done := make(chan struct{}, 3)
+		go func() { updateMoviesCache(); done <- struct{}{} }()
+		go func() { updateTVShowsCache(); done <- struct{}{} }()
+		go func() { updatePopularCache(); done <- struct{}{} }()
+		<-done
+		<-done
+		<-done
+
+		// Auto-refresh every 30 minutes
+		go func() {
+			ticker := time.NewTicker(30 * time.Minute)
+			defer ticker.Stop()
+			for range ticker.C {
+				go updateMoviesCache()
+				go updateTVShowsCache()
+				go updatePopularCache()
+			}
+		}()
+	}
+
+	http.HandleFunc("/api/home", homeHandler)
+	http.HandleFunc("/api/movies", moviesHandler)
+	http.HandleFunc("/api/tvshows", tvShowsHandler)
+	http.HandleFunc("/api/popular", popularHandler)
+	http.HandleFunc("/api/search", searchHandler)
+	http.HandleFunc("/api/detail", detailHandler)
+	http.HandleFunc("/api/episodes", episodesHandler)
+	http.HandleFunc("/api/media/source/movie/", mediaMovieSourceHandler)
+	http.HandleFunc("/api/media/source/tv/", mediaTVSourceHandler)
+	http.Handle("/", http.FileServer(http.Dir("./static")))
+
+	log.Println("Server listening on :8080 — open http://localhost:8080")
+	if err = http.ListenAndServe(":8080", nil); err != nil {
+		log.Fatal("Error starting server: ", err)
+	}
+}
