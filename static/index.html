@@ -35,7 +35,7 @@
     </nav>
 
     <!-- Search Overlay -->
-    <div id="search-overlay" class="search-overlay" role="dialog" aria-label="Search">
+    <div id="search-overlay" class="search-overlay" role="dialog" aria-modal="true" aria-labelledby="search-input" aria-hidden="true">
         <div class="search-overlay-inner">
             <div class="search-bar-wrap">
                 <svg class="search-icon-inside" xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
@@ -67,11 +67,11 @@
             <p id="hero-desc"></p>
             <div class="hero-meta-row" id="hero-meta-row"></div>
             <div class="hero-buttons">
-                <button id="hero-play" class="btn btn-primary">
+                <button id="hero-play" class="btn btn-primary" aria-label="Play selected title">
                     <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>
                     Play
                 </button>
-                <button id="hero-info" class="btn btn-secondary">
+                <button id="hero-info" class="btn btn-secondary" aria-label="Show selected title details">
                     <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
                     More Info
                 </button>
@@ -101,7 +101,7 @@
     </div>
 
     <!-- ═══ Detail / More Info Modal ═══ -->
-    <div id="detail-modal" class="detail-modal" role="dialog" aria-modal="true" aria-label="Title details">
+    <div id="detail-modal" class="detail-modal" role="dialog" aria-modal="true" aria-labelledby="detail-title" aria-hidden="true">
         <div class="detail-modal-backdrop" id="detail-modal-backdrop"></div>
         <div class="detail-modal-card" id="detail-modal-card">
 
@@ -197,10 +197,10 @@
 
 
     <!-- Netflix-Style Full-Screen Player -->
-    <div id="player-modal" class="player-modal">
+    <div id="player-modal" class="player-modal" role="dialog" aria-modal="true" aria-labelledby="player-movie-title" aria-hidden="true">
         <!-- Top control bar (auto-hides) -->
         <div class="player-controls-top" id="player-controls-top">
-            <button class="player-back-btn" id="close-player">
+            <button class="player-back-btn" id="close-player" aria-label="Close player">
                 <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>
             </button>
             <div class="player-meta">
@@ -219,19 +219,45 @@
                     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
                     <span>Episodes</span>
                 </button>
-                <select id="player-server-select" class="player-server-select" title="Select Server">
-                    <option value="vixsrc" selected>VixSrc</option>
-                    <option value="vidking">VidKing</option>
-                </select>
+                <div class="player-server-picker" id="player-server-picker">
+                    <svg class="player-server-icon" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                        <rect x="3" y="4" width="18" height="6" rx="2"></rect><rect x="3" y="14" width="18" height="6" rx="2"></rect><path d="M7 7h.01M7 17h.01"></path>
+                    </svg>
+                    <div class="player-server-copy">
+                        <span class="player-server-label">Playback</span>
+                        <button type="button" class="player-server-trigger" id="player-server-trigger" aria-haspopup="listbox" aria-expanded="false">
+                            <span id="player-server-current">VixSrc</span>
+                            <svg class="player-server-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                        </button>
+                    </div>
+                    <select id="player-server-select" class="player-native-select" aria-hidden="true" tabindex="-1">
+                        <option value="vixsrc" selected>VixSrc</option>
+                        <option value="vidking">VidKing</option>
+                    </select>
+                    <div class="player-server-menu" id="player-server-menu" role="listbox" aria-label="Playback server">
+                        <button type="button" role="option" data-server="vixsrc" aria-selected="true"><span class="server-option-dot"></span><span><strong>VixSrc</strong><small>Direct HLS playback</small></span><svg class="server-option-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+                        <button type="button" role="option" data-server="vidking" aria-selected="false"><span class="server-option-dot"></span><span><strong>VidKing</strong><small>Embedded playback</small></span><svg class="server-option-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg></button>
+                    </div>
+                </div>
             </div>
         </div>
 
         <!-- Episode List Panel (slide in from right) -->
         <div class="player-ep-panel" id="player-ep-panel">
             <div class="player-ep-panel-header">
-                <div class="player-ep-panel-title">Episodes</div>
-                <select class="player-ep-season-select" id="player-ep-season-select"></select>
-                <button class="player-ep-panel-close" id="player-ep-panel-close">
+                <div class="player-ep-panel-title-wrap">
+                    <div class="player-ep-panel-title">Episodes</div>
+                    <div class="player-ep-panel-subtitle">Choose an episode to watch</div>
+                </div>
+                <div class="player-season-picker" id="player-season-picker">
+                    <button type="button" class="player-season-trigger" id="player-season-trigger" aria-haspopup="listbox" aria-expanded="false">
+                        <span id="player-season-current">Season</span>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                    </button>
+                    <select class="player-ep-season-select player-native-select" id="player-ep-season-select" aria-hidden="true" tabindex="-1"></select>
+                    <div class="player-season-menu" id="player-season-menu" role="listbox" aria-label="Select season"></div>
+                </div>
+                <button class="player-ep-panel-close" id="player-ep-panel-close" aria-label="Close episode list">
                     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
                 </button>
             </div>
@@ -243,7 +269,49 @@
         </div>
 
         <!-- The existing GSFlix player surface. VixSrc uses this video element; VidKing uses the iframe. -->
-        <video id="vix-player" playsinline controls preload="auto"></video>
+        <button class="player-center-play" id="player-center-play" aria-label="Play or pause">
+            <svg id="player-center-play-icon" width="28" height="28" viewBox="0 0 24 24" fill="currentColor"><polygon points="8,5 19,12 8,19"></polygon></svg>
+        </button>
+        <video id="vix-player" playsinline preload="auto"></video>
+        <div class="player-controls-bottom" id="player-controls-bottom">
+            <div class="player-progress-wrap">
+                <input id="player-progress" class="player-progress" type="range" min="0" max="100" value="0" step="0.1" aria-label="Seek">
+            </div>
+            <div class="player-control-row">
+                <button class="player-icon-btn" id="player-play" aria-label="Play or pause">
+                    <svg id="player-play-icon" width="21" height="21" viewBox="0 0 24 24" fill="currentColor"><polygon points="8,5 19,12 8,19"></polygon></svg>
+                </button>
+                <button class="player-skip-btn player-skip-back" id="player-skip-back" aria-label="Back 10 seconds" title="Back 10 seconds">
+                    <svg width="48" height="48" viewBox="0 0 48 48" aria-hidden="true">
+                        <path d="M24 7a17 17 0 1 0 16.1 11.6" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+                        <path d="M24 7h-9.5V16.5" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        <text x="24" y="29.2" text-anchor="middle" fill="currentColor" font-size="12" font-weight="800">10</text>
+                        <text x="24" y="38" text-anchor="middle" fill="currentColor" font-size="7" font-weight="600">SEC</text>
+                    </svg>
+                </button>
+                <button class="player-skip-btn player-skip-forward" id="player-skip-forward" aria-label="Forward 10 seconds" title="Forward 10 seconds">
+                    <svg width="48" height="48" viewBox="0 0 48 48" aria-hidden="true">
+                        <path d="M24 7a17 17 0 1 1-16.1 11.6" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
+                        <path d="M24 7h9.5V16.5" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                        <text x="24" y="29.2" text-anchor="middle" fill="currentColor" font-size="12" font-weight="800">10</text>
+                        <text x="24" y="38" text-anchor="middle" fill="currentColor" font-size="7" font-weight="600">SEC</text>
+                    </svg>
+                </button>
+                <div class="player-volume-wrap">
+                    <button class="player-volume-btn" id="player-mute" aria-label="Mute" title="Mute">
+                        <svg id="player-volume-icon" width="23" height="23" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M11 5 6 9H3v6h3l5 4V5Z"></path><path d="M15.5 8.5a5 5 0 0 1 0 7"></path><path d="M18.5 6a8.5 8.5 0 0 1 0 12"></path>
+                        </svg>
+                    </button>
+                    <input id="player-volume" class="player-volume" type="range" min="0" max="1" value="1" step="0.01" aria-label="Volume">
+                </div>
+                <span class="player-time" id="player-time">0:00 / 0:00</span>
+                <div class="player-controls-spacer"></div>
+                <button class="player-icon-btn" id="player-fullscreen" aria-label="Fullscreen" title="Fullscreen">
+                    <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><polyline points="8 3 3 3 3 8"></polyline><polyline points="16 3 21 3 21 8"></polyline><polyline points="8 21 3 21 3 16"></polyline><polyline points="21 16 21 21 16 21"></polyline></svg>
+                </button>
+            </div>
+        </div>
         <iframe id="vidking-player" allowfullscreen allow="autoplay; encrypted-media; fullscreen; picture-in-picture" style="display:none"></iframe>
 
         <!-- Loading spinner -->

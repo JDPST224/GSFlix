@@ -12,8 +12,6 @@ import (
 
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
-
-	"movie/internal/config"
 )
 
 type MediaType string
@@ -36,15 +34,25 @@ type hlsCandidate struct {
 	status      int64
 }
 
+type Config struct {
+	TargetOrigin            string
+	BrowserHeadless         bool
+	BrowserTimeout          time.Duration
+	SourceResolutionTimeout time.Duration
+	MaxBrowserSessions      int
+	SourceCacheTTL          time.Duration
+	BrowserExecutable       string
+}
+
 type Resolver struct {
-	cfg    config.Config
+	cfg    Config
 	sem    chan struct{}
 	cache  *sourceCache
 	mu     sync.Mutex
 	closed bool
 }
 
-func New(cfg config.Config) (*Resolver, error) {
+func New(cfg Config) (*Resolver, error) {
 	if cfg.MaxBrowserSessions < 1 {
 		return nil, errors.New("MAX_BROWSER_SESSIONS must be greater than zero")
 	}

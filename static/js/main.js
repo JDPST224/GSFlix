@@ -30,6 +30,26 @@ document.addEventListener('DOMContentLoaded', () => {
     const playerEpList        = document.getElementById('player-ep-list');
     const playerEpLoading     = document.getElementById('player-ep-loading');
     const playerServerSelect  = document.getElementById('player-server-select');
+    const playerServerPicker  = document.getElementById('player-server-picker');
+    const playerServerTrigger = document.getElementById('player-server-trigger');
+    const playerServerCurrent = document.getElementById('player-server-current');
+    const playerServerMenu    = document.getElementById('player-server-menu');
+    const playerSeasonPicker  = document.getElementById('player-season-picker');
+    const playerSeasonTrigger = document.getElementById('player-season-trigger');
+    const playerSeasonCurrent = document.getElementById('player-season-current');
+    const playerSeasonMenu    = document.getElementById('player-season-menu');
+    const playerControlsBottom= document.getElementById('player-controls-bottom');
+    const playerPlay          = document.getElementById('player-play');
+    const playerPlayIcon      = document.getElementById('player-play-icon');
+    const playerCenterPlay    = document.getElementById('player-center-play');
+    const playerCenterPlayIcon= document.getElementById('player-center-play-icon');
+    const playerProgress      = document.getElementById('player-progress');
+    const playerTime          = document.getElementById('player-time');
+    const playerMute          = document.getElementById('player-mute');
+    const playerVolume        = document.getElementById('player-volume');
+    const playerSkipBack      = document.getElementById('player-skip-back');
+    const playerSkipForward   = document.getElementById('player-skip-forward');
+    const playerFullscreen    = document.getElementById('player-fullscreen');
 
     // Detail modal
     const detailModal         = document.getElementById('detail-modal');
@@ -80,6 +100,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let heroRotateTimer   = null;
     let controlsHideTimer = null;
     let searchDebounce    = null;
+    let searchRequestId   = 0;
+    let detailRequestId   = 0;
+    let playerRequestId   = 0;
     let currentDetailMovie = null;
     let currentDetailData  = null;  // full TMDB detail object
     let currentEpisodes    = [];    // episode list for current season
@@ -88,11 +111,17 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentPlayerSeason   = null;
     let currentPlayerEpisode  = null;
     let vixHlsInstance        = null;
+    let activePlayerServer   = 'vixsrc';
+    let playerReady          = false;
 
     // ─── My List (localStorage) ──────────────────────────────────────────────
     function getMyList() {
-        try { return JSON.parse(localStorage.getItem('gsflix_mylist') || '[]'); }
-        catch { return []; }
+        try {
+            const list = JSON.parse(localStorage.getItem('gsflix_mylist') || '[]');
+            return Array.isArray(list) ? list : [];
+        } catch {
+            return [];
+        }
     }
     function saveMyList(list) {
         localStorage.setItem('gsflix_mylist', JSON.stringify(list));
@@ -271,6 +300,12 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Banner click area → open detail modal
         heroClickArea.onclick = () => openDetailModal(movie);
+        heroClickArea.onkeydown = e => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                openDetailModal(movie);
+            }
+        };
 
         heroAddList.onclick = () => {
             const added = toggleMyList(movie);
@@ -360,11 +395,24 @@ document.addEventListener('DOMContentLoaded', () => {
     function createPosterCard(movie, small = false, isContinueWatching = false) {
         const card = document.createElement('div');
         card.className = 'poster-card' + (small ? ' poster-card-sm' : '');
-        if (isContinueWatching) {
-            card.addEventListener('click', () => openPlayer(movie));
-        } else {
-            card.addEventListener('click', () => openDetailModal(movie));
-        }
+        card.setAttribute('role', 'button');
+        card.setAttribute('tabindex', '0');
+        card.setAttribute('aria-label', isContinueWatching ? `Play ${movie.title}` : `View details for ${movie.title}`);
+
+        const activateCard = () => {
+            if (isContinueWatching) {
+                openPlayer(movie);
+            } else {
+                openDetailModal(movie);
+            }
+        };
+        card.addEventListener('click', activateCard);
+        card.addEventListener('keydown', e => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                activateCard();
+            }
+        });
 
         const wrapper = document.createElement('div');
         wrapper.className = 'poster-wrapper';
@@ -471,6 +519,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // ═══════════════════════════════════════════════════════════════════════════
 
     function openDetailModal(movie) {
+        const requestId = ++detailRequestId;
         currentDetailMovie = movie;
         currentDetailData  = null;
         trailerVisible     = false;
@@ -521,20 +570,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // Show modal
         detailModal.style.display = 'flex';
+        detailModal.setAttribute('aria-hidden', 'false');
         document.body.style.overflow = 'hidden';
         requestAnimationFrame(() => requestAnimationFrame(() => detailModal.classList.add('show')));
 
         // Fetch full detail
-        fetchDetailData(movie);
+        fetchDetailData(movie, requestId);
     }
 
-    function fetchDetailData(movie) {
-        fetch(`/api/detail?type=${movie.type}&id=${movie.id}`)
+    function fetchDetailData(movie, requestId) {
+        fetch(`/api/detail?type=${encodeURIComponent(movie.type)}&id=${encodeURIComponent(movie.id)}`)
             .then(r => {
                 if (!r.ok) throw new Error('detail fetch failed');
                 return r.json();
             })
             .then(data => {
+                if (requestId !== detailRequestId || currentDetailMovie !== movie) return;
                 currentDetailData = data;
                 populateDetailModal(movie, data);
             })
@@ -866,7 +917,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ─── Close detail modal ───────────────────────────────────────────────────
     function closeDetailModal() {
+        detailRequestId++;
         detailModal.classList.remove('show');
+        detailModal.setAttribute('aria-hidden', 'true');
         document.body.style.overflow = '';
         // Stop trailer
         detailTrailerIframe.src = '';
@@ -884,12 +937,15 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function openSearch() {
         searchOverlay.classList.add('show');
+        searchOverlay.setAttribute('aria-hidden', 'false');
         document.body.style.overflow = 'hidden';
         setTimeout(() => searchInput.focus(), 100);
     }
 
     function closeSearch() {
+        searchRequestId++;
         searchOverlay.classList.remove('show');
+        searchOverlay.setAttribute('aria-hidden', 'true');
         document.body.style.overflow = '';
         searchInput.value = '';
         searchResultsGrid.innerHTML = '';
@@ -901,6 +957,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     searchInput.addEventListener('input', () => {
         clearTimeout(searchDebounce);
+        const requestId = ++searchRequestId;
         const q = searchInput.value.trim();
         if (!q) {
             searchResultsGrid.innerHTML = '';
@@ -911,13 +968,17 @@ document.addEventListener('DOMContentLoaded', () => {
         searchPlaceholder.style.display = 'none';
         searchLoading.style.display = 'flex';
         searchResultsGrid.innerHTML = '';
-        searchDebounce = setTimeout(() => doSearch(q), 400);
+        searchDebounce = setTimeout(() => doSearch(q, requestId), 400);
     });
 
-    function doSearch(q) {
+    function doSearch(q, requestId) {
         fetch(`/api/search?q=${encodeURIComponent(q)}`)
-            .then(r => r.json())
+            .then(r => {
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                return r.json();
+            })
             .then(results => {
+                if (requestId !== searchRequestId) return;
                 searchLoading.style.display = 'none';
                 searchResultsGrid.innerHTML = '';
                 if (!results || results.length === 0) {
@@ -931,6 +992,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
             })
             .catch(() => {
+                if (requestId !== searchRequestId) return;
                 searchLoading.style.display = 'none';
                 searchResultsGrid.innerHTML = `<div class="search-no-results"><p>Search failed. Please try again.</p></div>`;
             });
@@ -953,7 +1015,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const prog = JSON.parse(localStorage.getItem('gsflix_progress') || '{}');
             prog[id] = { season, episode };
             localStorage.setItem('gsflix_progress', JSON.stringify(prog));
-        } catch(e) {}
+        } catch (e) { console.warn('Could not save playback progress:', e); }
     }
 
     function addToContinueWatching(movie) {
@@ -966,11 +1028,17 @@ document.addEventListener('DOMContentLoaded', () => {
             cw.unshift(clone);
             if (cw.length > 20) cw.pop();
             localStorage.setItem('gsflix_cw', JSON.stringify(cw));
-        } catch(e) {}
+        } catch (e) { console.warn('Could not save continue-watching state:', e); }
     }
 
     function getContinueWatching() {
-        try { return JSON.parse(localStorage.getItem('gsflix_cw') || '[]'); } catch(e) { return []; }
+        try {
+            const list = JSON.parse(localStorage.getItem('gsflix_cw') || '[]');
+            return Array.isArray(list) ? list : [];
+        } catch (e) {
+            console.warn('Could not read continue-watching state:', e);
+            return [];
+        }
     }
 
     function removeFromContinueWatching(id) {
@@ -978,7 +1046,7 @@ document.addEventListener('DOMContentLoaded', () => {
             let cw = JSON.parse(localStorage.getItem('gsflix_cw') || '[]');
             cw = cw.filter(m => m.id !== id);
             localStorage.setItem('gsflix_cw', JSON.stringify(cw));
-        } catch(e) {}
+        } catch (e) { console.warn('Could not update continue-watching state:', e); }
     }
 
     // ─── Player ───────────────────────────────────────────────────────────────
@@ -992,6 +1060,7 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function launchPlayer(movie, season, episode) {
+        const requestId = ++playerRequestId;
         currentPlayerMovie = movie;
         currentPlayerSeason = season || 1;
         currentPlayerEpisode = episode || 1;
@@ -1010,12 +1079,16 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         const server = playerServerSelect ? playerServerSelect.value : 'vixsrc';
+        activePlayerServer = server;
+        playerReady = false;
         playerMovieTitle.textContent = movie.type === 'tv'
             ? `${movie.title} — S${String(currentPlayerSeason).padStart(2,'0')}E${String(currentPlayerEpisode).padStart(2,'0')}`
             : movie.title || '';
 
+        playerLoader.innerHTML = '<div class="player-spinner"></div>';
         playerLoader.style.display = 'flex';
         playerModal.style.display = 'flex';
+        playerModal.setAttribute('aria-hidden', 'false');
         document.body.style.overflow = 'hidden';
         requestAnimationFrame(() => requestAnimationFrame(() => {
             playerModal.classList.add('show');
@@ -1023,6 +1096,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }));
 
         stopVixPlayback();
+        resetPlayerUI(server);
         vixPlayer.style.display = 'none';
         vidkingPlayer.style.display = 'none';
         vidkingPlayer.src = '';
@@ -1030,7 +1104,16 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             if (server === 'vidking') {
                 vidkingPlayer.style.display = 'block';
-                vidkingPlayer.onload = () => { playerLoader.style.display = 'none'; };
+                vidkingPlayer.onload = () => {
+                    if (requestId !== playerRequestId) return;
+                    playerReady = true;
+                    playerLoader.style.display = 'none';
+                    showControls();
+                };
+                vidkingPlayer.onerror = () => {
+                    if (requestId !== playerRequestId) return;
+                    showPlayerError('VidKing could not load this video. Try VixSrc.');
+                };
                 if (movie.type === 'tv') {
                     vidkingPlayer.src = `https://www.vidking.net/embed/tv/${movie.id}/${currentPlayerSeason}/${currentPlayerEpisode}?color=e50914&autoPlay=true`;
                 } else {
@@ -1059,14 +1142,16 @@ document.addEventListener('DOMContentLoaded', () => {
                 throw new Error(`Resolver returned an invalid response (${response.status})`);
             }
 
+            if (requestId !== playerRequestId) return;
             if (!response.ok || !data.success || !data.url || data.type !== 'hls') {
                 throw new Error(data.error || 'Unable to resolve media source');
             }
 
-            await loadVixSource(data.url);
+            await loadVixSource(data.url, requestId);
         } catch (error) {
+            if (requestId !== playerRequestId) return;
             console.error('[Player] Source resolution failed:', error);
-            playerLoader.innerHTML = '<div style="color:#fff;text-align:center;padding:24px">Unable to load this media.<br><small style="opacity:.65">Please try again or select another server.</small></div>';
+            showPlayerError(error.message || 'Unable to load this media.');
         }
     }
 
@@ -1082,10 +1167,24 @@ document.addEventListener('DOMContentLoaded', () => {
         vixPlayer.onerror = null;
     }
 
-    function loadVixSource(url) {
+    function loadVixSource(url, requestId) {
         return new Promise((resolve, reject) => {
+            let resolved = false;
             const finishReady = () => {
+                if (resolved) return;
+                if (requestId !== playerRequestId) {
+                    resolved = true;
+                    resolve();
+                    return;
+                }
+                playerReady = true;
                 playerLoader.style.display = 'none';
+                updatePlayerPlayIcon();
+                showControls();
+                // Start playback when the source is actually ready. If autoplay is
+                // blocked by the browser, the normal play button remains available.
+                vixPlayer.play().catch(() => {});
+                resolved = true;
                 resolve();
             };
 
@@ -1136,9 +1235,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
                         const audioTracks = vixHlsInstance.audioTracks || [];
                         if (audioTracks.length > 0) {
-                            let defaultAudio = audioTracks.findIndex(track => track && track.default);
-                            if (defaultAudio < 0) defaultAudio = 0;
-                            vixHlsInstance.audioTrack = defaultAudio;
+                            // Prefer the highest-quality audio track independently of video.
+                            // Bitrate is primary; channels and sample rate break ties.
+                            let bestAudio = 0;
+                            for (let i = 1; i < audioTracks.length; i++) {
+                                const a = audioTracks[i] || {};
+                                const b = audioTracks[bestAudio] || {};
+                                const aBitrate = Number(a.bitrate) || Number(a.attrs?.BANDWIDTH) || 0;
+                                const bBitrate = Number(b.bitrate) || Number(b.attrs?.BANDWIDTH) || 0;
+                                const aChannels = Number(a.channels) || Number(a.attrs?.CHANNELS?.match?.(/\d+/)?.[0]) || 0;
+                                const bChannels = Number(b.channels) || Number(b.attrs?.CHANNELS?.match?.(/\d+/)?.[0]) || 0;
+                                const aRate = Number(a.sampleRate) || Number(a.attrs?.['SAMPLE-RATE']) || 0;
+                                const bRate = Number(b.sampleRate) || Number(b.attrs?.['SAMPLE-RATE']) || 0;
+                                if (aBitrate > bBitrate ||
+                                    (aBitrate === bBitrate && aChannels > bChannels) ||
+                                    (aBitrate === bBitrate && aChannels === bChannels && aRate > bRate)) {
+                                    bestAudio = i;
+                                }
+                            }
+                            vixHlsInstance.audioTrack = bestAudio;
                         }
 
                         vixPlayer.muted = false;
@@ -1155,21 +1270,48 @@ document.addEventListener('DOMContentLoaded', () => {
                         });
                     }
 
-                    finishReady();
+                    // MANIFEST_PARSED only means the playlist is known; the video
+                    // frame may still be unavailable. Wait for media readiness below.
                 });
+                vixPlayer.addEventListener('canplay', finishReady, { once: true });
+                vixPlayer.addEventListener('loadeddata', finishReady, { once: true });
                 vixHlsInstance.on(Hls.Events.AUDIO_TRACKS_UPDATED, function() {
                     const tracks = vixHlsInstance.audioTracks || [];
-                    if (tracks.length > 0 && vixHlsInstance.audioTrack < 0) {
-                        let defaultAudio = tracks.findIndex(track => track && track.default);
-                        if (defaultAudio < 0) defaultAudio = 0;
-                        vixHlsInstance.audioTrack = defaultAudio;
+                    if (tracks.length > 0) {
+                        let bestAudio = 0;
+                        for (let i = 1; i < tracks.length; i++) {
+                            const a = tracks[i] || {};
+                            const b = tracks[bestAudio] || {};
+                            const aBitrate = Number(a.bitrate) || Number(a.attrs?.BANDWIDTH) || 0;
+                            const bBitrate = Number(b.bitrate) || Number(b.attrs?.BANDWIDTH) || 0;
+                            const aChannels = Number(a.channels) || Number(a.attrs?.CHANNELS?.match?.(/\d+/)?.[0]) || 0;
+                            const bChannels = Number(b.channels) || Number(b.attrs?.CHANNELS?.match?.(/\d+/)?.[0]) || 0;
+                            const aRate = Number(a.sampleRate) || Number(a.attrs?.['SAMPLE-RATE']) || 0;
+                            const bRate = Number(b.sampleRate) || Number(b.attrs?.['SAMPLE-RATE']) || 0;
+                            if (aBitrate > bBitrate ||
+                                (aBitrate === bBitrate && aChannels > bChannels) ||
+                                (aBitrate === bBitrate && aChannels === bChannels && aRate > bRate)) {
+                                bestAudio = i;
+                            }
+                        }
+                        vixHlsInstance.audioTrack = bestAudio;
                         vixPlayer.muted = false;
                     }
                 });
 
                 vixHlsInstance.on(Hls.Events.ERROR, function(event, data) {
+                    if (requestId !== playerRequestId) return;
                     console.error('[Player] HLS error:', data.type, data.details, data.error || '');
                     if (data.fatal) {
+                        // A forced top rendition can occasionally be incompatible with
+                        // a browser/device. Fall back to HLS ABR once before failing.
+                        if (vixHlsInstance && !vixHlsInstance.__gsflixRecovered) {
+                            vixHlsInstance.__gsflixRecovered = true;
+                            vixHlsInstance.startLevel = -1;
+                            vixHlsInstance.currentLevel = -1;
+                            vixHlsInstance.autoLevelEnabled = true;
+                            return;
+                        }
                         reject(new Error('HLS playback failed'));
                     }
                 });
@@ -1196,14 +1338,52 @@ document.addEventListener('DOMContentLoaded', () => {
         loadPlayerEpisodesPanel();
     });
 
-    if (playerServerSelect) {
-        playerServerSelect.addEventListener('change', () => {
-            if (currentPlayerMovie) {
-                // Keep the same movie, season, and episode but reload player iframe
-                launchPlayer(currentPlayerMovie, currentPlayerSeason, currentPlayerEpisode);
-            }
+    function syncServerPicker() {
+        if (!playerServerSelect) return;
+        const value = playerServerSelect.value || 'vixsrc';
+        const option = playerServerSelect.options[playerServerSelect.selectedIndex];
+        if (playerServerCurrent) playerServerCurrent.textContent = option ? option.textContent : value;
+        playerServerMenu?.querySelectorAll('[data-server]').forEach(btn => {
+            const selected = btn.dataset.server === value;
+            btn.setAttribute('aria-selected', selected ? 'true' : 'false');
         });
     }
+
+    if (playerServerSelect) {
+        playerServerSelect.addEventListener('change', () => {
+            syncServerPicker();
+            playerServerPicker?.classList.remove('open');
+            playerServerTrigger?.setAttribute('aria-expanded', 'false');
+            if (currentPlayerMovie) launchPlayer(currentPlayerMovie, currentPlayerSeason, currentPlayerEpisode);
+        });
+    }
+    playerServerTrigger?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const open = playerServerPicker.classList.toggle('open');
+        playerServerTrigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+    playerServerMenu?.querySelectorAll('[data-server]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            if (!playerServerSelect) return;
+            playerServerSelect.value = btn.dataset.server;
+            playerServerSelect.dispatchEvent(new Event('change', { bubbles: true }));
+        });
+    });
+
+    playerSeasonTrigger?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const open = playerSeasonPicker.classList.toggle('open');
+        playerSeasonTrigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+
+    document.addEventListener('click', () => {
+        playerServerPicker?.classList.remove('open');
+        playerServerTrigger?.setAttribute('aria-expanded', 'false');
+        playerSeasonPicker?.classList.remove('open');
+        playerSeasonTrigger?.setAttribute('aria-expanded', 'false');
+    });
+
+    syncServerPicker();
 
     playerEpPanelClose.addEventListener('click', () => {
         playerEpPanel.classList.remove('show');
@@ -1211,6 +1391,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function loadPlayerEpisodesPanel() {
         playerEpSeasonSelect.innerHTML = '';
+        if (playerSeasonMenu) playerSeasonMenu.innerHTML = '';
         playerEpLoading.style.display = 'flex';
         playerEpList.innerHTML = '';
         playerEpList.appendChild(playerEpLoading);
@@ -1221,14 +1402,34 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (!data || !data.seasons) throw new Error('No seasons');
                 const seasons = data.seasons.filter(s => s.season_number > 0);
                 seasons.forEach(s => {
+                    const label = s.name || `Season ${s.season_number}`;
                     const opt = document.createElement('option');
                     opt.value = s.season_number;
-                    opt.textContent = s.name || `Season ${s.season_number}`;
+                    opt.textContent = label;
                     if (s.season_number === currentPlayerSeason) opt.selected = true;
                     playerEpSeasonSelect.appendChild(opt);
+
+                    const btn = document.createElement('button');
+                    btn.type = 'button';
+                    btn.dataset.season = s.season_number;
+                    btn.textContent = label;
+                    if (s.season_number === currentPlayerSeason) btn.classList.add('active');
+                    btn.addEventListener('click', () => {
+                        playerEpSeasonSelect.value = String(s.season_number);
+                        playerSeasonCurrent.textContent = label;
+                        playerSeasonMenu.querySelectorAll('button').forEach(b => b.classList.toggle('active', b === btn));
+                        playerSeasonPicker.classList.remove('open');
+                        playerSeasonTrigger.setAttribute('aria-expanded', 'false');
+                        fetchPlayerEpisodes(s.season_number);
+                    });
+                    playerSeasonMenu.appendChild(btn);
                 });
+                playerSeasonCurrent.textContent = playerEpSeasonSelect.options[playerEpSeasonSelect.selectedIndex]?.textContent || `Season ${currentPlayerSeason}`;
                 playerEpSeasonSelect.onchange = () => {
-                    fetchPlayerEpisodes(parseInt(playerEpSeasonSelect.value));
+                    const season = parseInt(playerEpSeasonSelect.value);
+                    playerSeasonCurrent.textContent = playerEpSeasonSelect.options[playerEpSeasonSelect.selectedIndex]?.textContent || `Season ${season}`;
+                    playerSeasonMenu.querySelectorAll('button').forEach(b => b.classList.toggle('active', Number(b.dataset.season) === season));
+                    fetchPlayerEpisodes(season);
                 };
                 fetchPlayerEpisodes(currentPlayerSeason);
             })
@@ -1292,9 +1493,41 @@ document.addEventListener('DOMContentLoaded', () => {
             });
     }
 
+    function showPlayerError(message) {
+        playerReady = false;
+        playerLoader.innerHTML = `
+            <div class="player-error">
+                <div class="player-error-icon">!</div>
+                <strong>Unable to play this title</strong>
+                <span>${escapeHtml(message)}</span>
+                <button type="button" class="player-error-btn" id="player-retry">Try again</button>
+            </div>`;
+        playerLoader.style.display = 'flex';
+        document.getElementById('player-retry')?.addEventListener('click', () => {
+            if (currentPlayerMovie) launchPlayer(currentPlayerMovie, currentPlayerSeason, currentPlayerEpisode);
+        }, { once: true });
+    }
+
+    function resetPlayerUI(server) {
+        const custom = server === 'vixsrc';
+        [playerControlsBottom, playerCenterPlay].forEach(el => {
+            if (el) el.style.display = custom ? '' : 'none';
+        });
+        playerModal.classList.toggle('iframe-mode', !custom);
+        if (playerProgress) playerProgress.value = 0;
+        if (playerTime) playerTime.textContent = '0:00 / 0:00';
+        if (playerVolume) playerVolume.value = vixPlayer.muted ? 0 : vixPlayer.volume || 1;
+    }
+
+    function escapeHtml(value) {
+        return String(value).replace(/[&<>\"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]));
+    }
+
     function closePlayerModal() {
+        playerRequestId++;
         clearTimeout(controlsHideTimer);
         playerModal.classList.remove('show');
+        playerModal.setAttribute('aria-hidden', 'true');
         document.body.style.overflow = '';
         setTimeout(() => {
             playerModal.style.display = 'none';
@@ -1304,21 +1537,98 @@ document.addEventListener('DOMContentLoaded', () => {
             vixPlayer.style.display = 'none';
             playerLoader.innerHTML = '<div class="player-spinner"></div>';
             playerLoader.style.display = 'flex';
+            resetPlayerUI('vixsrc');
         }, 350);
     }
 
     function showControls() {
+        playerModal.classList.add('player-controls-visible');
         playerControlsTop.classList.remove('hidden');
+        if (playerControlsBottom) playerControlsBottom.classList.remove('hidden');
         playerModal.style.cursor = 'default';
         clearTimeout(controlsHideTimer);
         controlsHideTimer = setTimeout(() => {
             playerControlsTop.classList.add('hidden');
+            if (playerControlsBottom) playerControlsBottom.classList.add('hidden');
+            playerModal.classList.remove('player-controls-visible');
             playerModal.style.cursor = 'none';
         }, 3000);
     }
 
-    playerModal.addEventListener('mousemove', () => { if (playerModal.classList.contains('show')) showControls(); });
-    playerModal.addEventListener('mouseleave', () => { clearTimeout(controlsHideTimer); playerControlsTop.classList.add('hidden'); });
+    function formatPlayerTime(seconds) {
+        if (!Number.isFinite(seconds)) return '0:00';
+        seconds = Math.max(0, Math.floor(seconds));
+        const h = Math.floor(seconds / 3600), m = Math.floor((seconds % 3600) / 60), s = seconds % 60;
+        return h > 0 ? `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}` : `${m}:${String(s).padStart(2,'0')}`;
+    }
+    function updatePlayerPlayIcon() {
+        const playing = !vixPlayer.paused;
+        const pause = '<rect x="6" y="5" width="4" height="14" rx="1"></rect><rect x="14" y="5" width="4" height="14" rx="1"></rect>';
+        const play = '<polygon points="8,5 19,12 8,19"></polygon>';
+        if (playerPlayIcon) playerPlayIcon.innerHTML = playing ? pause : play;
+        if (playerCenterPlayIcon) playerCenterPlayIcon.innerHTML = playing ? pause : play;
+        if (playerCenterPlay) {
+            playerCenterPlay.classList.toggle('is-paused', !playing);
+            playerCenterPlay.classList.toggle('is-playing', playing);
+        }
+    }
+    function toggleVixPlay() {
+        if (activePlayerServer !== 'vixsrc' || !playerReady) return;
+        if (vixPlayer.paused) vixPlayer.play().catch(() => {}); else vixPlayer.pause();
+        showControls();
+    }
+
+    if (playerPlay) playerPlay.addEventListener('click', toggleVixPlay);
+    if (playerCenterPlay) playerCenterPlay.addEventListener('click', toggleVixPlay);
+    vixPlayer.addEventListener('click', () => { if (activePlayerServer === 'vixsrc' && playerReady) toggleVixPlay(); });
+    vixPlayer.addEventListener('play', updatePlayerPlayIcon);
+    vixPlayer.addEventListener('pause', updatePlayerPlayIcon);
+    vixPlayer.addEventListener('timeupdate', () => {
+        const duration = Number.isFinite(vixPlayer.duration) ? vixPlayer.duration : 0;
+        if (playerProgress) { const pct = duration ? (vixPlayer.currentTime / duration) * 100 : 0; playerProgress.value = pct; playerProgress.style.setProperty('--progress', `${pct}%`); }
+        if (playerTime) playerTime.textContent = `${formatPlayerTime(vixPlayer.currentTime)} / ${formatPlayerTime(duration)}`;
+    });
+    vixPlayer.addEventListener('loadedmetadata', () => {
+        if (playerTime) playerTime.textContent = `0:00 / ${formatPlayerTime(vixPlayer.duration)}`;
+        updatePlayerPlayIcon();
+    });
+    vixPlayer.addEventListener('ended', () => {
+        updatePlayerPlayIcon();
+        if (currentPlayerMovie?.type === 'tv') {
+            setTimeout(() => { if (playerModal.classList.contains('show')) playerNextEp.click(); }, 500);
+        }
+    });
+    if (playerProgress) playerProgress.addEventListener('input', () => {
+        if (activePlayerServer !== 'vixsrc' || !Number.isFinite(vixPlayer.duration)) return;
+        vixPlayer.currentTime = (Number(playerProgress.value) / 100) * vixPlayer.duration;
+        showControls();
+    });
+    if (playerSkipBack) playerSkipBack.addEventListener('click', () => { if (activePlayerServer === 'vixsrc') vixPlayer.currentTime = Math.max(0, vixPlayer.currentTime - 10); showControls(); });
+    if (playerSkipForward) playerSkipForward.addEventListener('click', () => { if (activePlayerServer === 'vixsrc' && Number.isFinite(vixPlayer.duration)) vixPlayer.currentTime = Math.min(vixPlayer.duration, vixPlayer.currentTime + 10); showControls(); });
+    if (playerMute) playerMute.addEventListener('click', () => {
+        if (activePlayerServer !== 'vixsrc') return;
+        vixPlayer.muted = !vixPlayer.muted;
+        if (playerVolume) playerVolume.value = vixPlayer.muted ? 0 : vixPlayer.volume;
+        showControls();
+    });
+    if (playerVolume) playerVolume.addEventListener('input', () => {
+        if (activePlayerServer !== 'vixsrc') return;
+        vixPlayer.volume = Number(playerVolume.value);
+        vixPlayer.muted = vixPlayer.volume === 0;
+        showControls();
+    });
+    if (playerFullscreen) playerFullscreen.addEventListener('click', () => {
+        const target = playerModal;
+        if (!document.fullscreenElement) target.requestFullscreen?.().catch(() => {}); else document.exitFullscreen?.().catch(() => {});
+        showControls();
+    });
+
+    playerModal.addEventListener('mousemove', (e) => {
+        if (!playerModal.classList.contains('show')) return;
+        if (e.target.closest('.player-ep-panel')) return;
+        showControls();
+    });
+    playerModal.addEventListener('mouseleave', () => { clearTimeout(controlsHideTimer); playerControlsTop.classList.add('hidden'); if (playerControlsBottom) playerControlsBottom.classList.add('hidden'); });
     closePlayer.addEventListener('click', closePlayerModal);
 
     // ─── Keyboard shortcuts ───────────────────────────────────────────────────

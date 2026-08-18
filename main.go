@@ -9,11 +9,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"movie/internal/config"
 	"movie/internal/mediaresolver"
 )
 
@@ -49,27 +49,6 @@ type TMDBMovie struct {
 	ReleaseDate   string  `json:"release_date"`
 	FirstAirDate  string  `json:"first_air_date"`
 	GenreIDs      []int   `json:"genre_ids"`
-}
-
-// ── Detail / Episode Structs ─────────────────────────────────────────────────
-
-type DetailResponse struct {
-	ID              int            `json:"id"`
-	Title           string         `json:"title"`
-	Tagline         string         `json:"tagline"`
-	Overview        string         `json:"overview"`
-	VoteAverage     float64        `json:"vote_average"`
-	ReleaseDate     string         `json:"release_date"`
-	FirstAirDate    string         `json:"first_air_date"`
-	Runtime         int            `json:"runtime"`
-	NumberOfSeasons int            `json:"number_of_seasons"`
-	Genres          []TMDBGenre    `json:"genres"`
-	BackdropPath    string         `json:"backdrop_path"`
-	PosterPath      string         `json:"poster_path"`
-	Credits         TMDBCredits    `json:"credits"`
-	Videos          TMDBVideos     `json:"videos"`
-	Recommendations TMDBRecommends `json:"recommendations"`
-	Seasons         []TMDBSeason   `json:"seasons"`
 }
 
 type TMDBGenre struct {
@@ -110,10 +89,6 @@ type TMDBSeason struct {
 	PosterPath   string `json:"poster_path"`
 }
 
-type SeasonResponse struct {
-	Episodes []TMDBEpisode `json:"episodes"`
-}
-
 type TMDBEpisode struct {
 	EpisodeNumber int     `json:"episode_number"`
 	Name          string  `json:"name"`
@@ -135,35 +110,133 @@ var cachedPopular []Movie
 var cacheMutex sync.RWMutex
 var tvMutex sync.RWMutex
 var popularMutex sync.RWMutex
+var moviesRefreshMu sync.Mutex
+var tvRefreshMu sync.Mutex
+var popularRefreshMu sync.Mutex
 var tmdbToken string  // Bearer Read Access Token
 var tmdbAPIKey string // v3 API key (fallback)
 
-func loadConfig(path string) error {
+func loadConfig(path string) (mediaresolver.Config, error) {
+	cfg := mediaresolver.Config{
+		TargetOrigin:            "https://vixsrc.to",
+		BrowserHeadless:         true,
+		BrowserTimeout:          30 * time.Second,
+		SourceResolutionTimeout: 20 * time.Second,
+		MaxBrowserSessions:      3,
+		SourceCacheTTL:          60 * time.Second,
+	}
+
 	file, err := os.Open(path)
 	if err != nil {
-		return err
+		return cfg, err
 	}
 	defer file.Close()
 
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		if len(line) == 0 || strings.HasPrefix(line, "#") {
+		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 		parts := strings.SplitN(line, "=", 2)
-		if len(parts) == 2 {
-			key := strings.TrimSpace(parts[0])
-			val := strings.TrimSpace(parts[1])
-			switch key {
-			case "TMDB_ACCESS_TOKEN":
-				tmdbToken = val
-			case "TMDB_API_KEY":
-				tmdbAPIKey = val
+		if len(parts) != 2 {
+			continue
+		}
+
+		key := strings.TrimSpace(parts[0])
+		val := strings.TrimSpace(parts[1])
+		switch key {
+		case "TMDB_ACCESS_TOKEN":
+			tmdbToken = cleanConfigValue(val)
+		case "TMDB_API_KEY":
+			tmdbAPIKey = cleanConfigValue(val)
+		case "BROWSER_HEADLESS":
+			if v, err := strconv.ParseBool(val); err == nil {
+				cfg.BrowserHeadless = v
 			}
+		case "BROWSER_TIMEOUT":
+			if v, err := time.ParseDuration(val); err == nil && v > 0 {
+				cfg.BrowserTimeout = v
+			}
+		case "SOURCE_RESOLUTION_TIMEOUT":
+			if v, err := time.ParseDuration(val); err == nil && v > 0 {
+				cfg.SourceResolutionTimeout = v
+			}
+		case "MAX_BROWSER_SESSIONS":
+			if v, err := strconv.Atoi(val); err == nil && v > 0 {
+				cfg.MaxBrowserSessions = v
+			}
+		case "SOURCE_CACHE_TTL":
+			if v, err := time.ParseDuration(val); err == nil && v > 0 {
+				cfg.SourceCacheTTL = v
+			}
+		case "BROWSER_EXECUTABLE":
+			cfg.BrowserExecutable = val
+		case "TARGET_ORIGIN":
+			cfg.TargetOrigin = val
 		}
 	}
-	return scanner.Err()
+
+	if err := scanner.Err(); err != nil {
+		return cfg, err
+	}
+
+	// Environment variables remain supported as explicit runtime overrides.
+	if v := os.Getenv("BROWSER_HEADLESS"); v != "" {
+		if b, err := strconv.ParseBool(v); err == nil {
+			cfg.BrowserHeadless = b
+		}
+	}
+	if v := os.Getenv("BROWSER_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.BrowserTimeout = d
+		}
+	}
+	if v := os.Getenv("SOURCE_RESOLUTION_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.SourceResolutionTimeout = d
+		}
+	}
+	if v := os.Getenv("MAX_BROWSER_SESSIONS"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			cfg.MaxBrowserSessions = n
+		}
+	}
+	if v := os.Getenv("SOURCE_CACHE_TTL"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			cfg.SourceCacheTTL = d
+		}
+	}
+	if v := os.Getenv("BROWSER_EXECUTABLE"); v != "" {
+		cfg.BrowserExecutable = v
+	}
+	if v := os.Getenv("TARGET_ORIGIN"); v != "" {
+		cfg.TargetOrigin = v
+	}
+
+	// Environment variables are explicit runtime overrides. Only override
+	// values loaded from config.conf when the variable is actually set.
+	if v := os.Getenv("TMDB_ACCESS_TOKEN"); strings.TrimSpace(v) != "" {
+		tmdbToken = cleanConfigValue(v)
+	}
+	if v := os.Getenv("TMDB_API_KEY"); strings.TrimSpace(v) != "" {
+		tmdbAPIKey = cleanConfigValue(v)
+	}
+
+	return cfg, nil
+}
+
+// cleanConfigValue trims whitespace and optional single/double quotes around
+// configuration values, making both KEY=value and KEY="value" work.
+func cleanConfigValue(v string) string {
+	v = strings.TrimSpace(v)
+	if len(v) >= 2 {
+		if (v[0] == '"' && v[len(v)-1] == '"') ||
+			(v[0] == '\'' && v[len(v)-1] == '\'') {
+			v = strings.TrimSpace(v[1 : len(v)-1])
+		}
+	}
+	return v
 }
 
 func buildURL(endpoint string) string {
@@ -280,6 +353,12 @@ func fetchTMDB(endpoint string, categories []string, mediaType string) []Movie {
 }
 
 func updateMoviesCache() {
+	if !moviesRefreshMu.TryLock() {
+		log.Println("Movies cache refresh already in progress; skipping overlapping refresh")
+		return
+	}
+	defer moviesRefreshMu.Unlock()
+
 	log.Println("Refreshing movies cache...")
 	var allMovies []Movie
 
@@ -318,6 +397,12 @@ func updateMoviesCache() {
 }
 
 func updateTVShowsCache() {
+	if !tvRefreshMu.TryLock() {
+		log.Println("TV cache refresh already in progress; skipping overlapping refresh")
+		return
+	}
+	defer tvRefreshMu.Unlock()
+
 	log.Println("Refreshing TV shows cache...")
 	var allShows []Movie
 
@@ -355,6 +440,12 @@ func updateTVShowsCache() {
 }
 
 func updatePopularCache() {
+	if popularRefreshMu.TryLock() == false {
+		log.Println("Popular cache refresh already in progress; skipping overlapping refresh")
+		return
+	}
+	defer popularRefreshMu.Unlock()
+
 	log.Println("Refreshing popular/new cache...")
 	var all []Movie
 
@@ -725,7 +816,7 @@ func detailHandler(w http.ResponseWriter, r *http.Request) {
 	mediaType := strings.TrimSpace(r.URL.Query().Get("type"))
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
 
-	if id == "" || (mediaType != "movie" && mediaType != "tv") {
+	if !validMediaID(id) || (mediaType != "movie" && mediaType != "tv") {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{}`))
 		return
@@ -797,7 +888,7 @@ func episodesHandler(w http.ResponseWriter, r *http.Request) {
 
 	id := strings.TrimSpace(r.URL.Query().Get("id"))
 	season := strings.TrimSpace(r.URL.Query().Get("season"))
-	if id == "" || season == "" {
+	if !validMediaID(id) || !validMediaID(season) {
 		w.WriteHeader(http.StatusBadRequest)
 		w.Write([]byte(`{}`))
 		return
@@ -840,18 +931,17 @@ func episodesHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	cfg := config.Load()
+	cfg, configErr := loadConfig("config.conf")
+	if configErr != nil {
+		log.Fatal("Failed to load config.conf: ", configErr)
+	}
+
 	var resolverErr error
 	mediaSourceResolver, resolverErr = mediaresolver.New(cfg)
 	if resolverErr != nil {
 		log.Fatal("Failed to initialize media source resolver: ", resolverErr)
 	}
 	defer mediaSourceResolver.Close()
-
-	err := loadConfig("config.conf")
-	if err != nil {
-		log.Println("Warning: Could not load config.conf:", err)
-	}
 
 	if tmdbToken == "" && tmdbAPIKey == "" {
 		log.Println("WARNING: No TMDB credentials in config.conf")
@@ -896,7 +986,7 @@ func main() {
 	http.Handle("/", http.FileServer(http.Dir("./static")))
 
 	log.Println("Server listening on :8080 — open http://localhost:8080")
-	if err = http.ListenAndServe(":8080", nil); err != nil {
+	if err := http.ListenAndServe(":8080", nil); err != nil {
 		log.Fatal("Error starting server: ", err)
 	}
 }
