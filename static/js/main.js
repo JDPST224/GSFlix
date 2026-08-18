@@ -18,8 +18,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const playerModal         = document.getElementById('player-modal');
     const closePlayer         = document.getElementById('close-player');
     const vixPlayer           = document.getElementById('vix-player');
-    const vidkingPlayer        = document.getElementById('vidking-player');
     const playerMovieTitle    = document.getElementById('player-movie-title');
+    const playerMovieSubtitle = document.getElementById('player-movie-subtitle');
     const playerControlsTop   = document.getElementById('player-controls-top');
     const playerLoader        = document.getElementById('player-loader');
     const playerNextEp        = document.getElementById('player-next-ep');
@@ -52,7 +52,8 @@ document.addEventListener('DOMContentLoaded', () => {
     const playerCenterPlay    = document.getElementById('player-center-play');
     const playerCenterPlayIcon= document.getElementById('player-center-play-icon');
     const playerProgress      = document.getElementById('player-progress');
-    const playerTime          = document.getElementById('player-time');
+    const playerTimeCurrent   = document.getElementById('player-time-current');
+    const playerTimeDuration  = document.getElementById('player-time-duration');
     const playerMute          = document.getElementById('player-mute');
     const playerVolume        = document.getElementById('player-volume');
     const playerSkipBack      = document.getElementById('player-skip-back');
@@ -109,6 +110,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let controlsHideTimer = null;
     let searchDebounce    = null;
     let searchRequestId   = 0;
+    let catalogRequestId  = 0;
     let detailRequestId   = 0;
     let playerRequestId   = 0;
     let currentDetailMovie = null;
@@ -119,11 +121,26 @@ document.addEventListener('DOMContentLoaded', () => {
     let currentPlayerSeason   = null;
     let currentPlayerEpisode  = null;
     let vixHlsInstance        = null;
-    let activePlayerServer   = 'vixsrc';
+    let activePlayerServer   = 'vidking';
     let playerReady          = false;
     let playerAudioTracks    = [];
     let playerSubtitleTracks = [];
     let playerAudioInitialized = false;
+
+    // ─── Helpers ──────────────────────────────────────────────────────────────
+    function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+    function mediaKey(movie) {
+        if (!movie || typeof movie !== 'object') return '';
+        return `${movie.type || 'movie'}-${movie.id}`;
+    }
+    function syncBodyOverflow() {
+        const lock = detailModal.classList.contains('show')
+            || playerModal.classList.contains('show')
+            || searchOverlay.classList.contains('show');
+        document.body.style.overflow = lock ? 'hidden' : '';
+    }
 
     // ─── My List (localStorage) ──────────────────────────────────────────────
     function getMyList() {
@@ -137,12 +154,14 @@ document.addEventListener('DOMContentLoaded', () => {
     function saveMyList(list) {
         localStorage.setItem('gsflix_mylist', JSON.stringify(list));
     }
-    function isInMyList(id) {
-        return getMyList().some(m => m.id === id);
+    function isInMyList(movie) {
+        const key = mediaKey(movie);
+        return getMyList().some(m => mediaKey(m) === key);
     }
     function toggleMyList(movie) {
         let list = getMyList();
-        const idx = list.findIndex(m => m.id === movie.id);
+        const key = mediaKey(movie);
+        const idx = list.findIndex(m => mediaKey(m) === key);
         if (idx === -1) { list.unshift(movie); }
         else { list.splice(idx, 1); }
         saveMyList(list);
@@ -175,6 +194,7 @@ document.addEventListener('DOMContentLoaded', () => {
         carouselsContainer.style.display = '';
 
         if (page === 'mylist') {
+            catalogRequestId++;
             loadMyListPage();
         } else {
             const endpoint = {
@@ -190,12 +210,14 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     function fetchAndRender(endpoint, page) {
+        const requestId = ++catalogRequestId;
         fetch(endpoint)
             .then(res => {
                 if (!res.ok) throw new Error(`HTTP ${res.status}`);
                 return res.json();
             })
             .then(movies => {
+                if (requestId !== catalogRequestId) return;
                 carouselsContainer.innerHTML = '';
                 if (!movies || movies.length === 0) {
                     showError('No content found. Check your TMDB API key.');
@@ -224,6 +246,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 Object.keys(categories).forEach(cat => renderRow(cat, categories[cat]));
             })
             .catch(err => {
+                if (requestId !== catalogRequestId) return;
                 console.error('Error fetching content:', err);
                 carouselsContainer.innerHTML = '';
                 showError('Failed to connect to the server. Make sure the server is running.');
@@ -323,8 +346,10 @@ document.addEventListener('DOMContentLoaded', () => {
             heroAddList.classList.toggle('in-list', added);
             heroAddList.querySelector('svg').style.transform = added ? 'rotate(45deg)' : '';
         };
-        const inList = isInMyList(movie.id);
+        const inList = isInMyList(movie);
         heroAddList.classList.toggle('in-list', inList);
+        const heroListSvg = heroAddList.querySelector('svg');
+        if (heroListSvg) heroListSvg.style.transform = inList ? 'rotate(45deg)' : '';
     }
 
     function buildHeroDots(count, active) {
@@ -453,7 +478,7 @@ document.addEventListener('DOMContentLoaded', () => {
             removeBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`;
             removeBtn.addEventListener('click', e => {
                 e.stopPropagation();
-                removeFromContinueWatching(movie.id);
+                removeFromContinueWatching(movie);
                 card.remove();
             });
             wrapper.appendChild(removeBtn);
@@ -564,7 +589,7 @@ document.addEventListener('DOMContentLoaded', () => {
         detailEpSearch.value = '';
 
         // My list state
-        const inList = isInMyList(movie.id);
+        const inList = isInMyList(movie);
         detailListIconAdd.style.display   = inList ? 'none' : '';
         detailListIconCheck.style.display = inList ? '' : 'none';
         detailAddList.classList.toggle('in-list', inList);
@@ -582,8 +607,10 @@ document.addEventListener('DOMContentLoaded', () => {
         // Show modal
         detailModal.style.display = 'flex';
         detailModal.setAttribute('aria-hidden', 'false');
-        document.body.style.overflow = 'hidden';
-        requestAnimationFrame(() => requestAnimationFrame(() => detailModal.classList.add('show')));
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+            detailModal.classList.add('show');
+            syncBodyOverflow();
+        }));
 
         // Fetch full detail
         fetchDetailData(movie, requestId);
@@ -789,21 +816,21 @@ document.addEventListener('DOMContentLoaded', () => {
         detailEpSearch.value = '';
         currentEpisodes = [];
 
-        fetch(`/api/episodes?id=${tvId}&season=${seasonNum}`)
+        fetch(`/api/episodes?id=${encodeURIComponent(tvId)}&season=${encodeURIComponent(seasonNum)}`)
             .then(r => {
                 if (!r.ok) throw new Error('episodes fetch failed');
                 return r.json();
             })
             .then(data => {
                 currentEpisodes = (data.episodes || []).filter(ep => ep.episode_number > 0);
-                renderEpisodeList(currentEpisodes, tvId);
+                renderEpisodeList(currentEpisodes);
             })
             .catch(() => {
                 detailEpisodeList.innerHTML = '<div class="episode-no-results">Could not load episodes.</div>';
             });
     }
 
-    function renderEpisodeList(episodes, tvId) {
+    function renderEpisodeList(episodes) {
         detailEpisodeList.innerHTML = '';
         if (!episodes || episodes.length === 0) {
             detailEpisodeList.innerHTML = '<div class="episode-no-results">No episodes found.</div>';
@@ -868,18 +895,9 @@ document.addEventListener('DOMContentLoaded', () => {
             info.appendChild(titleRow);
             if (ep.overview) info.appendChild(desc);
 
-            // Download button (decorative)
-            const dlBtn = document.createElement('button');
-            dlBtn.className = 'episode-dl-btn';
-            dlBtn.setAttribute('aria-label', 'Download');
-            dlBtn.title = 'Download';
-            dlBtn.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>`;
-            dlBtn.addEventListener('click', e => e.stopPropagation());
-
             item.appendChild(numBadge);
             item.appendChild(stillWrap);
             item.appendChild(info);
-            item.appendChild(dlBtn);
 
             // Play episode on click
             item.addEventListener('click', () => {
@@ -896,14 +914,14 @@ document.addEventListener('DOMContentLoaded', () => {
     detailEpSearch.addEventListener('input', () => {
         const q = detailEpSearch.value.toLowerCase().trim();
         if (!q) {
-            renderEpisodeList(currentEpisodes, currentDetailMovie?.id);
+            renderEpisodeList(currentEpisodes);
             return;
         }
         const filtered = currentEpisodes.filter(ep =>
             (ep.name || '').toLowerCase().includes(q) ||
             (ep.overview || '').toLowerCase().includes(q)
         );
-        renderEpisodeList(filtered, currentDetailMovie?.id);
+        renderEpisodeList(filtered);
     });
 
     // ─── Trailer toggle ───────────────────────────────────────────────────────
@@ -931,7 +949,7 @@ document.addEventListener('DOMContentLoaded', () => {
         detailRequestId++;
         detailModal.classList.remove('show');
         detailModal.setAttribute('aria-hidden', 'true');
-        document.body.style.overflow = '';
+        syncBodyOverflow();
         // Stop trailer
         detailTrailerIframe.src = '';
         detailTrailerWrap.style.display = 'none';
@@ -949,7 +967,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function openSearch() {
         searchOverlay.classList.add('show');
         searchOverlay.setAttribute('aria-hidden', 'false');
-        document.body.style.overflow = 'hidden';
+        syncBodyOverflow();
         setTimeout(() => searchInput.focus(), 100);
     }
 
@@ -957,7 +975,7 @@ document.addEventListener('DOMContentLoaded', () => {
         searchRequestId++;
         searchOverlay.classList.remove('show');
         searchOverlay.setAttribute('aria-hidden', 'true');
-        document.body.style.overflow = '';
+        syncBodyOverflow();
         searchInput.value = '';
         searchResultsGrid.innerHTML = '';
         searchPlaceholder.style.display = '';
@@ -1009,22 +1027,21 @@ document.addEventListener('DOMContentLoaded', () => {
             });
     }
 
-    function escapeHtml(str) {
-        return str.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-    }
-
     // ─── Progress Tracking (localStorage) ────────────────────────────────────
-    function getProgress(id) {
-        try { 
-            const prog = JSON.parse(localStorage.getItem('gsflix_progress') || '{}'); 
-            return prog[id] || { season: 1, episode: 1 };
+    function getProgress(movie) {
+        try {
+            const prog = JSON.parse(localStorage.getItem('gsflix_progress') || '{}');
+            const key = mediaKey(movie);
+            return prog[key] || prog[movie.id] || { season: 1, episode: 1 };
         }
         catch { return { season: 1, episode: 1 }; }
     }
-    function saveProgress(id, season, episode) {
+    function saveProgress(movie, season, episode) {
         try {
             const prog = JSON.parse(localStorage.getItem('gsflix_progress') || '{}');
-            prog[id] = { season, episode };
+            const key = mediaKey(movie);
+            delete prog[movie.id];
+            prog[key] = { season, episode };
             localStorage.setItem('gsflix_progress', JSON.stringify(prog));
         } catch (e) { console.warn('Could not save playback progress:', e); }
     }
@@ -1032,7 +1049,8 @@ document.addEventListener('DOMContentLoaded', () => {
     function addToContinueWatching(movie) {
         try {
             let cw = JSON.parse(localStorage.getItem('gsflix_cw') || '[]');
-            cw = cw.filter(m => m.id !== movie.id);
+            const key = mediaKey(movie);
+            cw = cw.filter(m => mediaKey(m) !== key);
             const clone = Object.assign({}, movie);
             delete clone.description;
             delete clone.banner;
@@ -1052,10 +1070,11 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
-    function removeFromContinueWatching(id) {
+    function removeFromContinueWatching(movie) {
         try {
             let cw = JSON.parse(localStorage.getItem('gsflix_cw') || '[]');
-            cw = cw.filter(m => m.id !== id);
+            const key = mediaKey(movie);
+            cw = cw.filter(m => mediaKey(m) !== key);
             localStorage.setItem('gsflix_cw', JSON.stringify(cw));
         } catch (e) { console.warn('Could not update continue-watching state:', e); }
     }
@@ -1063,7 +1082,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // ─── Player ───────────────────────────────────────────────────────────────
     function openPlayer(movie) {
         if (movie.type === 'tv') {
-            const prog = getProgress(movie.id);
+            const prog = getProgress(movie);
             launchPlayer(movie, prog.season, prog.episode);
         } else {
             launchPlayer(movie);
@@ -1094,6 +1113,14 @@ document.addEventListener('DOMContentLoaded', () => {
         return preferred >= 0 ? preferred : 0;
     }
 
+    function chooseDefaultSubtitleIndex(tracks) {
+        if (!tracks.length) return -1;
+        const english = tracks.findIndex(isEnglishTrack);
+        if (english >= 0) return english;
+        const preferred = tracks.findIndex(isDefaultTrack);
+        return preferred >= 0 ? preferred : 0;
+    }
+
     function renderTrackMenu(menu, tracks, currentIndex, type) {
         if (!menu) return;
         menu.innerHTML = '';
@@ -1110,7 +1137,7 @@ document.addEventListener('DOMContentLoaded', () => {
         if (!tracks.length) {
             const empty = document.createElement('div');
             empty.className = 'player-track-empty';
-            empty.textContent = type === 'audio' ? 'No alternate audio' : 'No subtitles available';
+            empty.textContent = type === 'audio' ? 'No alternate audio from this server' : 'No subtitles from this server';
             menu.appendChild(empty);
             return;
         }
@@ -1129,7 +1156,12 @@ document.addEventListener('DOMContentLoaded', () => {
     function syncPlayerAudioMenu(index) {
         if (!playerAudioCurrent) return;
         const track = playerAudioTracks[index];
-        playerAudioCurrent.textContent = track ? normalizeTrackLabel(track, isEnglishTrack(track) ? 'English' : 'Original', index) : 'Original';
+        const label = track ? normalizeTrackLabel(track, isEnglishTrack(track) ? 'English' : 'Original', index) : 'Original';
+        playerAudioCurrent.textContent = label;
+        if (playerAudioTrigger) {
+            playerAudioTrigger.title = `Audio: ${label}`;
+            playerAudioTrigger.setAttribute('aria-label', `Audio, ${label}`);
+        }
         playerAudioMenu?.querySelectorAll('[data-track-index]').forEach(button => {
             button.setAttribute('aria-selected', Number(button.dataset.trackIndex) === index ? 'true' : 'false');
         });
@@ -1137,9 +1169,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function syncPlayerSubtitleMenu(index) {
         if (!playerSubtitleCurrent) return;
-        playerSubtitleCurrent.textContent = index >= 0 && playerSubtitleTracks[index]
+        const label = index >= 0 && playerSubtitleTracks[index]
             ? normalizeTrackLabel(playerSubtitleTracks[index], 'Subtitles', index)
             : 'Off';
+        playerSubtitleCurrent.textContent = label;
+        if (playerSubtitleTrigger) {
+            playerSubtitleTrigger.title = `Subtitles: ${label}`;
+            playerSubtitleTrigger.setAttribute('aria-label', `Subtitles, ${label}`);
+        }
         playerSubtitleMenu?.querySelectorAll('[data-track-index]').forEach(button => {
             button.setAttribute('aria-selected', Number(button.dataset.trackIndex) === index ? 'true' : 'false');
         });
@@ -1152,10 +1189,8 @@ document.addEventListener('DOMContentLoaded', () => {
         renderTrackMenu(playerSubtitleMenu, playerSubtitleTracks, subtitleIndex, 'subtitle');
         syncPlayerAudioMenu(audioIndex);
         syncPlayerSubtitleMenu(subtitleIndex);
-        const hasAudioChoices = playerAudioTracks.length > 1;
-        const hasSubtitleChoices = playerSubtitleTracks.length > 0;
-        if (playerAudioPicker) playerAudioPicker.style.display = hasAudioChoices ? '' : 'none';
-        if (playerSubtitlePicker) playerSubtitlePicker.style.display = hasSubtitleChoices ? '' : 'none';
+        if (playerAudioPicker) playerAudioPicker.style.display = '';
+        if (playerSubtitlePicker) playerSubtitlePicker.style.display = '';
     }
 
     function selectPlayerTrack(type, index) {
@@ -1181,8 +1216,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (playerSubtitleMenu) playerSubtitleMenu.innerHTML = '';
         if (playerAudioCurrent) playerAudioCurrent.textContent = 'Original';
         if (playerSubtitleCurrent) playerSubtitleCurrent.textContent = 'Off';
-        if (playerAudioPicker) playerAudioPicker.style.display = 'none';
-        if (playerSubtitlePicker) playerSubtitlePicker.style.display = 'none';
+        if (playerAudioPicker) playerAudioPicker.style.display = '';
+        if (playerSubtitlePicker) playerSubtitlePicker.style.display = '';
     }
 
     async function launchPlayer(movie, season, episode) {
@@ -1201,60 +1236,47 @@ document.addEventListener('DOMContentLoaded', () => {
 
         addToContinueWatching(movie);
         if (movie.type === 'tv') {
-            saveProgress(movie.id, currentPlayerSeason, currentPlayerEpisode);
+            saveProgress(movie, currentPlayerSeason, currentPlayerEpisode);
         }
 
-        const server = playerServerSelect ? playerServerSelect.value : 'vixsrc';
+        const server = playerServerSelect ? (playerServerSelect.value || 'vidking') : 'vidking';
         activePlayerServer = server;
         playerReady = false;
-        playerMovieTitle.textContent = movie.type === 'tv'
-            ? `${movie.title} — S${String(currentPlayerSeason).padStart(2,'0')}E${String(currentPlayerEpisode).padStart(2,'0')}`
-            : movie.title || '';
+        playerMovieTitle.textContent = movie.title || '';
+        if (playerMovieSubtitle) {
+            if (movie.type === 'tv') {
+                playerMovieSubtitle.textContent = `Season ${currentPlayerSeason}  ·  Episode ${currentPlayerEpisode}`;
+                playerMovieSubtitle.hidden = false;
+            } else {
+                playerMovieSubtitle.textContent = '';
+                playerMovieSubtitle.hidden = true;
+            }
+        }
 
         playerLoader.innerHTML = '<div class="player-spinner"></div>';
         playerLoader.style.display = 'flex';
-        playerModal.style.display = 'flex';
+        playerModal.classList.remove('player-ready');
+        playerModal.style.display = 'block';
         playerModal.setAttribute('aria-hidden', 'false');
-        document.body.style.overflow = 'hidden';
         requestAnimationFrame(() => requestAnimationFrame(() => {
             playerModal.classList.add('show');
+            syncBodyOverflow();
             showControls();
         }));
 
         stopVixPlayback();
         resetPlayerTracks();
-        resetPlayerUI(server);
-        vixPlayer.style.display = 'none';
-        vidkingPlayer.style.display = 'none';
-        vidkingPlayer.src = '';
+        resetPlayerUI();
+        vixPlayer.__dbgTimeLogged = false;
+        vixPlayer.style.display = 'block';
 
         try {
-            if (server === 'vidking') {
-                vidkingPlayer.style.display = 'block';
-                vidkingPlayer.onload = () => {
-                    if (requestId !== playerRequestId) return;
-                    playerReady = true;
-                    playerLoader.style.display = 'none';
-                    showControls();
-                };
-                vidkingPlayer.onerror = () => {
-                    if (requestId !== playerRequestId) return;
-                    showPlayerError('VidKing could not load this video. Try VixSrc.');
-                };
-                if (movie.type === 'tv') {
-                    vidkingPlayer.src = `https://www.vidking.net/embed/tv/${movie.id}/${currentPlayerSeason}/${currentPlayerEpisode}?color=e50914&autoPlay=true`;
-                } else {
-                    vidkingPlayer.src = `https://www.vidking.net/embed/movie/${movie.id}?color=e50914&autoPlay=true`;
-                }
-                return;
-            }
-
-            // VixSrc: resolve the current HLS source through the Go backend,
-            // then load it directly into the project's existing player surface.
-            vixPlayer.style.display = 'block';
+            // Providers are resolved to a proxied HLS manifest. The VidKing embed page is never
+            // rendered in GSFlix; it is used only by the backend to discover the HLS source.
+            const provider = server === 'vidking' ? 'vidking' : 'vixsrc';
             const endpoint = movie.type === 'tv'
-                ? `/api/media/source/tv/${encodeURIComponent(movie.id)}/${encodeURIComponent(currentPlayerSeason)}/${encodeURIComponent(currentPlayerEpisode)}`
-                : `/api/media/source/movie/${encodeURIComponent(movie.id)}`;
+                ? `/api/media/source/${provider}/tv/${encodeURIComponent(movie.id)}/${encodeURIComponent(currentPlayerSeason)}/${encodeURIComponent(currentPlayerEpisode)}`
+                : `/api/media/source/${provider}/movie/${encodeURIComponent(movie.id)}`;
 
             const response = await fetch(endpoint, {
                 method: 'GET',
@@ -1274,7 +1296,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 throw new Error(data.error || 'Unable to resolve media source');
             }
 
-            await loadVixSource(data.url, requestId);
+            await loadVixSource(data.url, requestId, provider);
         } catch (error) {
             if (requestId !== playerRequestId) return;
             console.error('[Player] Source resolution failed:', error);
@@ -1294,161 +1316,210 @@ document.addEventListener('DOMContentLoaded', () => {
         vixPlayer.onerror = null;
     }
 
-    function loadVixSource(url, requestId) {
+    function pickHighestLevel(hls) {
+        const levels = hls?.levels || [];
+        let bestLevel = -1;
+        for (let i = 0; i < levels.length; i++) {
+            const current = levels[i] || {};
+            const best = bestLevel >= 0 ? levels[bestLevel] : null;
+            if (!best ||
+                (current.height || 0) > (best.height || 0) ||
+                ((current.height || 0) === (best.height || 0) && (current.width || 0) > (best.width || 0)) ||
+                ((current.height || 0) === (best.height || 0) && (current.width || 0) === (best.width || 0) &&
+                 (current.bitrate || 0) > (best.bitrate || 0))) {
+                bestLevel = i;
+            }
+        }
+        return bestLevel;
+    }
+
+    function applyPlayerTracks(provider) {
+        if (!vixHlsInstance) return;
+        playerAudioTracks = vixHlsInstance.audioTracks || [];
+        playerSubtitleTracks = vixHlsInstance.subtitleTracks || [];
+        if (playerAudioTracks.length > 0 && !playerAudioInitialized) {
+            vixHlsInstance.audioTrack = chooseDefaultAudioIndex(playerAudioTracks);
+            playerAudioInitialized = true;
+        }
+        if (provider === 'vidking' && playerSubtitleTracks.length > 0 && vixHlsInstance.subtitleTrack < 0) {
+            vixHlsInstance.subtitleTrack = chooseDefaultSubtitleIndex(playerSubtitleTracks);
+        }
+        updatePlayerTrackMenus();
+    }
+
+    function loadVixSource(url, requestId, provider = 'vixsrc') {
         return new Promise((resolve, reject) => {
-            let resolved = false;
-            const finishReady = () => {
-                if (resolved) return;
+            let settled = false;
+            const readyTimeout = setTimeout(() => {
+                settleErr(new Error('Playback timed out while loading the stream'));
+            }, 25000);
+
+            const settleOk = () => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(readyTimeout);
                 if (requestId !== playerRequestId) {
-                    resolved = true;
                     resolve();
                     return;
                 }
                 playerReady = true;
                 playerLoader.style.display = 'none';
+                playerModal.classList.add('player-ready');
                 updatePlayerPlayIcon();
                 showControls();
-                // Start playback when the source is actually ready. If autoplay is
-                // blocked by the browser, the normal play button remains available.
-                vixPlayer.play().catch(() => {});
-                resolved = true;
                 resolve();
             };
 
-            vixPlayer.onerror = () => reject(new Error('The resolved HLS source could not be loaded by the browser'));
+            const settleErr = (err) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(readyTimeout);
+                reject(err instanceof Error ? err : new Error(String(err)));
+            };
+
+            const hasVideoFrame = () => vixPlayer.videoWidth > 0 && vixPlayer.videoHeight > 0;
+
+            const tryStartPlayback = () => {
+                if (settled || requestId !== playerRequestId) return;
+                if (!hasVideoFrame()) {
+                    return;
+                }
+                if (vixPlayer.paused) {
+                    const playAttempt = vixPlayer.play();
+                    if (playAttempt && typeof playAttempt.then === 'function') {
+                        playAttempt.catch(() => {});
+                    }
+                }
+                settleOk();
+            };
+
+            const applyInitialQuality = () => {
+                if (!vixHlsInstance) return;
+                const bestLevel = pickHighestLevel(vixHlsInstance);
+                if (bestLevel < 0) return;
+                vixHlsInstance.autoLevelEnabled = false;
+                vixHlsInstance.currentLevel = bestLevel;
+            };
+
+            vixPlayer.onerror = () => settleErr(new Error('The resolved HLS source could not be loaded by the browser'));
+            vixPlayer.addEventListener('loadeddata', tryStartPlayback);
+            vixPlayer.addEventListener('canplay', tryStartPlayback);
+            vixPlayer.addEventListener('playing', tryStartPlayback);
 
             if (window.Hls && Hls.isSupported()) {
                 vixHlsInstance = new Hls({
                     enableWorker: true,
                     lowLatencyMode: false,
-                    // Do not limit the selected quality to the video element size.
                     capLevelToPlayerSize: false,
+                    renderTextTracksNatively: true,
+                    autoStartLoad: true,
                     xhrSetup: function(xhr) {
                         xhr.withCredentials = false;
                     }
                 });
 
-                vixHlsInstance.loadSource(url);
-                vixHlsInstance.attachMedia(vixPlayer);
-
                 vixHlsInstance.on(Hls.Events.MANIFEST_PARSED, function() {
-                    // Select the highest available video rendition instead of letting
-                    // ABR start at a lower quality because of the initial bandwidth estimate.
-                    // Prefer resolution first, then bitrate as a tie-breaker.
-                    const levels = vixHlsInstance.levels || [];
-                    let bestLevel = -1;
-
-                    for (let i = 0; i < levels.length; i++) {
-                        const current = levels[i] || {};
-                        const best = bestLevel >= 0 ? levels[bestLevel] : null;
-
-                        if (!best ||
-                            (current.height || 0) > (best.height || 0) ||
-                            ((current.height || 0) === (best.height || 0) &&
-                             (current.width || 0) > (best.width || 0)) ||
-                            ((current.height || 0) === (best.height || 0) &&
-                             (current.width || 0) === (best.width || 0) &&
-                             (current.bitrate || 0) > (best.bitrate || 0))) {
-                            bestLevel = i;
-                        }
-                    }
-
-                    if (bestLevel >= 0) {
-                        // Keep the audio rendition enabled while forcing the highest
-                        // video rendition. Some HLS masters expose audio as a separate
-                        // rendition group; forcing the video level must not disable it.
-                        vixHlsInstance.autoLevelEnabled = false;
-                        vixHlsInstance.currentLevel = bestLevel;
-
-                        playerAudioTracks = vixHlsInstance.audioTracks || [];
-                        playerSubtitleTracks = vixHlsInstance.subtitleTracks || [];
-                        if (playerAudioTracks.length > 0 && !playerAudioInitialized) {
-                            vixHlsInstance.audioTrack = chooseDefaultAudioIndex(playerAudioTracks);
-                            playerAudioInitialized = true;
-                        }
-                        // Subtitles are intentionally off by default. The user can enable
-                        // any available track from the Subtitles menu.
+                    if (requestId !== playerRequestId) return;
+                    applyInitialQuality();
+                    applyPlayerTracks(provider);
+                    if (provider !== 'vidking') {
                         vixHlsInstance.subtitleTrack = -1;
                         updatePlayerTrackMenus();
-
-                        vixPlayer.muted = false;
-
-                        const selected = levels[bestLevel];
-                        console.info('[Player] Highest video quality selected; audio retained:', {
-                            level: bestLevel,
-                            width: selected.width,
-                            height: selected.height,
-                            bitrate: selected.bitrate,
-                            audioTrack: vixHlsInstance.audioTrack,
-                            audioTracks: audioTracks.length
-                        });
                     }
-
-                    // MANIFEST_PARSED only means the playlist is known; the video
-                    // frame may still be unavailable. Wait for media readiness below.
                 });
-                vixPlayer.addEventListener('canplay', finishReady, { once: true });
-                vixPlayer.addEventListener('loadeddata', finishReady, { once: true });
+                vixHlsInstance.on(Hls.Events.FRAG_BUFFERED, function() {
+                    if (requestId !== playerRequestId) return;
+                    tryStartPlayback();
+                });
                 vixHlsInstance.on(Hls.Events.AUDIO_TRACKS_UPDATED, function() {
                     if (requestId !== playerRequestId) return;
-                    playerAudioTracks = vixHlsInstance.audioTracks || [];
-                    if (playerAudioTracks.length > 0 && !playerAudioInitialized) {
-                        vixHlsInstance.audioTrack = chooseDefaultAudioIndex(playerAudioTracks);
-                        playerAudioInitialized = true;
-                    }
-                    updatePlayerTrackMenus();
-                    vixPlayer.muted = false;
+                    applyPlayerTracks(provider);
                 });
-
                 vixHlsInstance.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, function() {
                     if (requestId !== playerRequestId) return;
                     playerSubtitleTracks = vixHlsInstance.subtitleTracks || [];
-                    vixHlsInstance.subtitleTrack = -1;
+                    if (provider === 'vidking' && playerSubtitleTracks.length > 0 && vixHlsInstance.subtitleTrack < 0) {
+                        vixHlsInstance.subtitleTrack = chooseDefaultSubtitleIndex(playerSubtitleTracks);
+                    }
                     updatePlayerTrackMenus();
                 });
-
                 vixHlsInstance.on(Hls.Events.AUDIO_TRACK_SWITCHED, function() {
                     if (requestId !== playerRequestId) return;
                     syncPlayerAudioMenu(vixHlsInstance.audioTrack);
                 });
-
                 vixHlsInstance.on(Hls.Events.SUBTITLE_TRACK_SWITCH, function() {
                     if (requestId !== playerRequestId) return;
                     syncPlayerSubtitleMenu(vixHlsInstance.subtitleTrack);
                 });
-
                 vixHlsInstance.on(Hls.Events.ERROR, function(event, data) {
-                    if (requestId !== playerRequestId) return;
-                    console.error('[Player] HLS error:', data.type, data.details, data.error || '');
-                    if (data.fatal) {
-                        // A forced top rendition can occasionally be incompatible with
-                        // a browser/device. Fall back to HLS ABR once before failing.
-                        if (vixHlsInstance && !vixHlsInstance.__gsflixRecovered) {
-                            vixHlsInstance.__gsflixRecovered = true;
-                            vixHlsInstance.startLevel = -1;
-                            vixHlsInstance.currentLevel = -1;
-                            vixHlsInstance.autoLevelEnabled = true;
-                            return;
-                        }
-                        reject(new Error('HLS playback failed'));
+                    if (requestId !== playerRequestId || settled) return;
+                    console.error('[Player] HLS error:', data.type, data.details, data.error || '', data.response || '');
+                    if (!data.fatal) return;
+                    if (vixHlsInstance && !vixHlsInstance.__gsflixRecovered) {
+                        vixHlsInstance.__gsflixRecovered = true;
+                        vixHlsInstance.startLevel = -1;
+                        vixHlsInstance.currentLevel = -1;
+                        vixHlsInstance.nextLevel = -1;
+                        vixHlsInstance.autoLevelEnabled = true;
+                        vixHlsInstance.recoverMediaError();
+                        tryStartPlayback();
+                        return;
                     }
+                    let detail = data.details || 'HLS playback failed';
+                    if (data.response && data.response.code) {
+                        detail += ` (${data.response.code})`;
+                    }
+                    settleErr(new Error(detail));
                 });
+
+                vixHlsInstance.loadSource(url);
+                vixHlsInstance.attachMedia(vixPlayer);
                 return;
             }
 
             if (vixPlayer.canPlayType('application/vnd.apple.mpegurl')) {
+                vixPlayer.addEventListener('loadedmetadata', tryStartPlayback);
                 vixPlayer.src = url;
-                vixPlayer.addEventListener('loadedmetadata', finishReady, { once: true });
                 return;
             }
 
-            reject(new Error('This browser does not support HLS playback'));
+            settleErr(new Error('This browser does not support HLS playback'));
         });
     }
 
     // Episode panel logic
+    async function playNextEpisode() {
+        if (!currentPlayerMovie || currentPlayerMovie.type !== 'tv') return;
+        const tvId = currentPlayerMovie.id;
+        const season = currentPlayerSeason;
+        const episode = currentPlayerEpisode;
+        try {
+            const epRes = await fetch(`/api/episodes?id=${encodeURIComponent(tvId)}&season=${encodeURIComponent(season)}`);
+            if (!epRes.ok) throw new Error('episodes fetch failed');
+            const data = await epRes.json();
+            const episodes = (data.episodes || []).filter(ep => ep.episode_number > 0);
+            const nextInSeason = episodes.find(ep => ep.episode_number === episode + 1)
+                || episodes.find(ep => ep.episode_number > episode);
+            if (nextInSeason) {
+                launchPlayer(currentPlayerMovie, season, nextInSeason.episode_number);
+                return;
+            }
+            const detailRes = await fetch(`/api/detail?id=${encodeURIComponent(tvId)}&type=tv`);
+            if (!detailRes.ok) return;
+            const detail = await detailRes.json();
+            const seasons = (detail.seasons || [])
+                .filter(s => s.season_number > season)
+                .sort((a, b) => a.season_number - b.season_number);
+            if (seasons.length) {
+                launchPlayer(currentPlayerMovie, seasons[0].season_number, 1);
+            }
+        } catch (err) {
+            console.warn('Could not resolve next episode:', err);
+        }
+    }
+
     playerNextEp.addEventListener('click', () => {
-        launchPlayer(currentPlayerMovie, currentPlayerSeason, currentPlayerEpisode + 1);
+        playNextEpisode();
     });
 
     playerEpListBtn.addEventListener('click', () => {
@@ -1458,9 +1529,14 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function syncServerPicker() {
         if (!playerServerSelect) return;
-        const value = playerServerSelect.value || 'vixsrc';
+        const value = playerServerSelect.value || 'vidking';
         const option = playerServerSelect.options[playerServerSelect.selectedIndex];
-        if (playerServerCurrent) playerServerCurrent.textContent = option ? option.textContent : value;
+        const label = option ? option.textContent : value;
+        if (playerServerCurrent) playerServerCurrent.textContent = label;
+        if (playerServerTrigger) {
+            playerServerTrigger.title = `Server: ${label}`;
+            playerServerTrigger.setAttribute('aria-label', `Playback server, ${label}`);
+        }
         playerServerMenu?.querySelectorAll('[data-server]').forEach(btn => {
             const selected = btn.dataset.server === value;
             btn.setAttribute('aria-selected', selected ? 'true' : 'false');
@@ -1498,6 +1574,12 @@ document.addEventListener('DOMContentLoaded', () => {
     playerServerTrigger?.addEventListener('click', (e) => {
         e.stopPropagation();
         const open = playerServerPicker.classList.toggle('open');
+        if (open) {
+            playerAudioPicker?.classList.remove('open');
+            playerSubtitlePicker?.classList.remove('open');
+            playerAudioTrigger?.setAttribute('aria-expanded', 'false');
+            playerSubtitleTrigger?.setAttribute('aria-expanded', 'false');
+        }
         playerServerTrigger.setAttribute('aria-expanded', open ? 'true' : 'false');
     });
     playerServerMenu?.querySelectorAll('[data-server]').forEach(btn => {
@@ -1538,7 +1620,7 @@ document.addEventListener('DOMContentLoaded', () => {
         playerEpList.innerHTML = '';
         playerEpList.appendChild(playerEpLoading);
 
-        fetch(`/api/detail?id=${currentPlayerMovie.id}&type=tv`)
+        fetch(`/api/detail?id=${encodeURIComponent(currentPlayerMovie.id)}&type=tv`)
             .then(r => r.json())
             .then(data => {
                 if (!data || !data.seasons) throw new Error('No seasons');
@@ -1585,7 +1667,7 @@ document.addEventListener('DOMContentLoaded', () => {
         playerEpList.innerHTML = '';
         playerEpList.appendChild(playerEpLoading);
 
-        fetch(`/api/episodes?id=${currentPlayerMovie.id}&season=${seasonNum}`)
+        fetch(`/api/episodes?id=${encodeURIComponent(currentPlayerMovie.id)}&season=${encodeURIComponent(seasonNum)}`)
             .then(r => r.json())
             .then(data => {
                 playerEpList.innerHTML = '';
@@ -1650,19 +1732,14 @@ document.addEventListener('DOMContentLoaded', () => {
         }, { once: true });
     }
 
-    function resetPlayerUI(server) {
-        const custom = server === 'vixsrc';
+    function resetPlayerUI() {
         [playerControlsBottom, playerCenterPlay].forEach(el => {
-            if (el) el.style.display = custom ? '' : 'none';
+            if (el) el.style.display = '';
         });
-        playerModal.classList.toggle('iframe-mode', !custom);
         if (playerProgress) playerProgress.value = 0;
-        if (playerTime) playerTime.textContent = '0:00 / 0:00';
+        if (playerTimeCurrent) playerTimeCurrent.textContent = '0:00';
+        if (playerTimeDuration) playerTimeDuration.textContent = '0:00';
         if (playerVolume) playerVolume.value = vixPlayer.muted ? 0 : vixPlayer.volume || 1;
-    }
-
-    function escapeHtml(value) {
-        return String(value).replace(/[&<>\"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[c]));
     }
 
     function closePlayerModal() {
@@ -1670,16 +1747,15 @@ document.addEventListener('DOMContentLoaded', () => {
         clearTimeout(controlsHideTimer);
         playerModal.classList.remove('show');
         playerModal.setAttribute('aria-hidden', 'true');
-        document.body.style.overflow = '';
+        syncBodyOverflow();
         setTimeout(() => {
             playerModal.style.display = 'none';
+            playerModal.classList.remove('player-ready');
             stopVixPlayback();
-            vidkingPlayer.src = '';
-            vidkingPlayer.style.display = 'none';
             vixPlayer.style.display = 'none';
             playerLoader.innerHTML = '<div class="player-spinner"></div>';
             playerLoader.style.display = 'flex';
-            resetPlayerUI('vixsrc');
+            resetPlayerUI();
         }, 350);
     }
 
@@ -1714,55 +1790,69 @@ document.addEventListener('DOMContentLoaded', () => {
             playerCenterPlay.classList.toggle('is-playing', playing);
         }
     }
+    function isHlsServer(server) {
+        return server === 'vixsrc' || server === 'vidking';
+    }
+
     function toggleVixPlay() {
-        if (activePlayerServer !== 'vixsrc' || !playerReady) return;
+        if (!isHlsServer(activePlayerServer) || !playerReady) return;
         if (vixPlayer.paused) vixPlayer.play().catch(() => {}); else vixPlayer.pause();
         showControls();
     }
 
     if (playerPlay) playerPlay.addEventListener('click', toggleVixPlay);
     if (playerCenterPlay) playerCenterPlay.addEventListener('click', toggleVixPlay);
-    vixPlayer.addEventListener('click', () => { if (activePlayerServer === 'vixsrc' && playerReady) toggleVixPlay(); });
+    vixPlayer.addEventListener('click', () => { if (isHlsServer(activePlayerServer) && playerReady) toggleVixPlay(); });
     vixPlayer.addEventListener('play', updatePlayerPlayIcon);
     vixPlayer.addEventListener('pause', updatePlayerPlayIcon);
     vixPlayer.addEventListener('timeupdate', () => {
+        if (!vixPlayer.__dbgTimeLogged && vixPlayer.currentTime > 1) {
+            vixPlayer.__dbgTimeLogged = true;
+        }
         const duration = Number.isFinite(vixPlayer.duration) ? vixPlayer.duration : 0;
         if (playerProgress) { const pct = duration ? (vixPlayer.currentTime / duration) * 100 : 0; playerProgress.value = pct; playerProgress.style.setProperty('--progress', `${pct}%`); }
-        if (playerTime) playerTime.textContent = `${formatPlayerTime(vixPlayer.currentTime)} / ${formatPlayerTime(duration)}`;
+        if (playerTimeCurrent) playerTimeCurrent.textContent = formatPlayerTime(vixPlayer.currentTime);
+        if (playerTimeDuration) playerTimeDuration.textContent = formatPlayerTime(duration);
     });
     vixPlayer.addEventListener('loadedmetadata', () => {
-        if (playerTime) playerTime.textContent = `0:00 / ${formatPlayerTime(vixPlayer.duration)}`;
+        if (playerTimeCurrent) playerTimeCurrent.textContent = '0:00';
+        if (playerTimeDuration) playerTimeDuration.textContent = formatPlayerTime(vixPlayer.duration);
         updatePlayerPlayIcon();
     });
     vixPlayer.addEventListener('ended', () => {
         updatePlayerPlayIcon();
         if (currentPlayerMovie?.type === 'tv') {
-            setTimeout(() => { if (playerModal.classList.contains('show')) playerNextEp.click(); }, 500);
+            setTimeout(() => { if (playerModal.classList.contains('show')) playNextEpisode(); }, 500);
         }
     });
     if (playerProgress) playerProgress.addEventListener('input', () => {
-        if (activePlayerServer !== 'vixsrc' || !Number.isFinite(vixPlayer.duration)) return;
+        if (!isHlsServer(activePlayerServer) || !Number.isFinite(vixPlayer.duration)) return;
         vixPlayer.currentTime = (Number(playerProgress.value) / 100) * vixPlayer.duration;
         showControls();
     });
-    if (playerSkipBack) playerSkipBack.addEventListener('click', () => { if (activePlayerServer === 'vixsrc') vixPlayer.currentTime = Math.max(0, vixPlayer.currentTime - 10); showControls(); });
-    if (playerSkipForward) playerSkipForward.addEventListener('click', () => { if (activePlayerServer === 'vixsrc' && Number.isFinite(vixPlayer.duration)) vixPlayer.currentTime = Math.min(vixPlayer.duration, vixPlayer.currentTime + 10); showControls(); });
+    if (playerSkipBack) playerSkipBack.addEventListener('click', () => { if (isHlsServer(activePlayerServer)) vixPlayer.currentTime = Math.max(0, vixPlayer.currentTime - 10); showControls(); });
+    if (playerSkipForward) playerSkipForward.addEventListener('click', () => { if (isHlsServer(activePlayerServer) && Number.isFinite(vixPlayer.duration)) vixPlayer.currentTime = Math.min(vixPlayer.duration, vixPlayer.currentTime + 10); showControls(); });
     if (playerMute) playerMute.addEventListener('click', () => {
-        if (activePlayerServer !== 'vixsrc') return;
+        if (!isHlsServer(activePlayerServer)) return;
         vixPlayer.muted = !vixPlayer.muted;
         if (playerVolume) playerVolume.value = vixPlayer.muted ? 0 : vixPlayer.volume;
         showControls();
     });
     if (playerVolume) playerVolume.addEventListener('input', () => {
-        if (activePlayerServer !== 'vixsrc') return;
+        if (!isHlsServer(activePlayerServer)) return;
         vixPlayer.volume = Number(playerVolume.value);
         vixPlayer.muted = vixPlayer.volume === 0;
         showControls();
     });
-    if (playerFullscreen) playerFullscreen.addEventListener('click', () => {
+    function togglePlayerFullscreen() {
         const target = playerModal;
-        if (!document.fullscreenElement) target.requestFullscreen?.().catch(() => {}); else document.exitFullscreen?.().catch(() => {});
+        if (!document.fullscreenElement) target.requestFullscreen?.().catch(() => {});
+        else document.exitFullscreen?.().catch(() => {});
         showControls();
+    }
+
+    if (playerFullscreen) playerFullscreen.addEventListener('click', () => {
+        togglePlayerFullscreen();
     });
 
     playerModal.addEventListener('mousemove', (e) => {
@@ -1775,11 +1865,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // ─── Keyboard shortcuts ───────────────────────────────────────────────────
     document.addEventListener('keydown', e => {
+        const playerOpen = playerModal.classList.contains('show');
         if (e.key === 'Escape') {
             if (playerEpPanel.classList.contains('show')) { playerEpPanel.classList.remove('show'); return; }
-            if (playerModal.classList.contains('show'))   { closePlayerModal();   return; }
-            if (detailModal.classList.contains('show'))   { closeDetailModal();   return; }
-            if (searchOverlay.classList.contains('show')) { closeSearch();        return; }
+            if (playerOpen) { closePlayerModal(); return; }
+            if (detailModal.classList.contains('show')) { closeDetailModal(); return; }
+            if (searchOverlay.classList.contains('show')) { closeSearch(); return; }
+        }
+        if (playerOpen) {
+            if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey) {
+                const tag = document.activeElement.tagName;
+                if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT') {
+                    e.preventDefault();
+                    togglePlayerFullscreen();
+                }
+            }
+            return;
         }
         if ((e.key === '/' || e.key === 'f') && !e.ctrlKey && !e.metaKey) {
             const tag = document.activeElement.tagName;

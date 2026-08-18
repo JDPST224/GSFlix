@@ -51,54 +51,6 @@ type TMDBMovie struct {
 	GenreIDs      []int   `json:"genre_ids"`
 }
 
-type TMDBGenre struct {
-	ID   int    `json:"id"`
-	Name string `json:"name"`
-}
-
-type TMDBCredits struct {
-	Cast []TMDBCastMember `json:"cast"`
-}
-
-type TMDBCastMember struct {
-	Name        string `json:"name"`
-	Character   string `json:"character"`
-	ProfilePath string `json:"profile_path"`
-	Order       int    `json:"order"`
-}
-
-type TMDBVideos struct {
-	Results []TMDBVideo `json:"results"`
-}
-
-type TMDBVideo struct {
-	Key      string `json:"key"`
-	Site     string `json:"site"`
-	Type     string `json:"type"`
-	Official bool   `json:"official"`
-}
-
-type TMDBRecommends struct {
-	Results []TMDBMovie `json:"results"`
-}
-
-type TMDBSeason struct {
-	SeasonNumber int    `json:"season_number"`
-	Name         string `json:"name"`
-	EpisodeCount int    `json:"episode_count"`
-	PosterPath   string `json:"poster_path"`
-}
-
-type TMDBEpisode struct {
-	EpisodeNumber int     `json:"episode_number"`
-	Name          string  `json:"name"`
-	Overview      string  `json:"overview"`
-	StillPath     string  `json:"still_path"`
-	Runtime       int     `json:"runtime"`
-	VoteAverage   float64 `json:"vote_average"`
-	AirDate       string  `json:"air_date"`
-}
-
 var tmdbGenres = map[int]string{
 	28: "Action", 12: "Adventure", 16: "Animation", 35: "Comedy", 80: "Crime", 99: "Documentary", 18: "Drama", 10751: "Family", 14: "Fantasy", 36: "History", 27: "Horror", 10402: "Music", 9648: "Mystery", 10749: "Romance", 878: "Science Fiction", 10770: "TV Movie", 53: "Thriller", 10752: "War", 37: "Western",
 	10759: "Action & Adventure", 10762: "Kids", 10763: "News", 10764: "Reality", 10765: "Sci-Fi & Fantasy", 10766: "Soap", 10767: "Talk", 10768: "War & Politics",
@@ -119,11 +71,11 @@ var tmdbAPIKey string // v3 API key (fallback)
 func loadConfig(path string) (mediaresolver.Config, error) {
 	cfg := mediaresolver.Config{
 		TargetOrigin:            "https://vixsrc.to",
+		VidKingOrigin:           "https://www.vidking.net",
 		BrowserHeadless:         true,
 		BrowserTimeout:          30 * time.Second,
 		SourceResolutionTimeout: 20 * time.Second,
 		MaxBrowserSessions:      3,
-		SourceCacheTTL:          60 * time.Second,
 	}
 
 	file, err := os.Open(path)
@@ -166,14 +118,14 @@ func loadConfig(path string) (mediaresolver.Config, error) {
 			if v, err := strconv.Atoi(val); err == nil && v > 0 {
 				cfg.MaxBrowserSessions = v
 			}
-		case "SOURCE_CACHE_TTL":
-			if v, err := time.ParseDuration(val); err == nil && v > 0 {
-				cfg.SourceCacheTTL = v
-			}
 		case "BROWSER_EXECUTABLE":
 			cfg.BrowserExecutable = val
 		case "TARGET_ORIGIN":
 			cfg.TargetOrigin = val
+		case "VIXSRC_ORIGIN":
+			cfg.TargetOrigin = cleanConfigValue(val)
+		case "VIDKING_ORIGIN":
+			cfg.VidKingOrigin = cleanConfigValue(val)
 		}
 	}
 
@@ -202,16 +154,17 @@ func loadConfig(path string) (mediaresolver.Config, error) {
 			cfg.MaxBrowserSessions = n
 		}
 	}
-	if v := os.Getenv("SOURCE_CACHE_TTL"); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d > 0 {
-			cfg.SourceCacheTTL = d
-		}
-	}
 	if v := os.Getenv("BROWSER_EXECUTABLE"); v != "" {
 		cfg.BrowserExecutable = v
 	}
 	if v := os.Getenv("TARGET_ORIGIN"); v != "" {
 		cfg.TargetOrigin = v
+	}
+	if v := os.Getenv("VIXSRC_ORIGIN"); v != "" {
+		cfg.TargetOrigin = v
+	}
+	if v := os.Getenv("VIDKING_ORIGIN"); v != "" {
+		cfg.VidKingOrigin = v
 	}
 
 	// Environment variables are explicit runtime overrides. Only override
@@ -352,6 +305,30 @@ func fetchTMDB(endpoint string, categories []string, mediaType string) []Movie {
 	return movies
 }
 
+type tmdbTask struct {
+	endpoint   string
+	categories []string
+	mediaType  string
+}
+
+func fetchTMDBTasks(tasks []tmdbTask) []Movie {
+	results := make([][]Movie, len(tasks))
+	var wg sync.WaitGroup
+	for i, t := range tasks {
+		wg.Add(1)
+		go func(i int, t tmdbTask) {
+			defer wg.Done()
+			results[i] = fetchTMDB(t.endpoint, t.categories, t.mediaType)
+		}(i, t)
+	}
+	wg.Wait()
+	var all []Movie
+	for _, movies := range results {
+		all = append(all, movies...)
+	}
+	return all
+}
+
 func updateMoviesCache() {
 	if !moviesRefreshMu.TryLock() {
 		log.Println("Movies cache refresh already in progress; skipping overlapping refresh")
@@ -360,31 +337,19 @@ func updateMoviesCache() {
 	defer moviesRefreshMu.Unlock()
 
 	log.Println("Refreshing movies cache...")
-	var allMovies []Movie
-
-	type task struct {
-		endpoint   string
-		categories []string
-	}
-
-	tasks := []task{
-		{"/trending/movie/day?language=en-US", []string{"Trending Now"}},
-		{"/movie/popular?language=en-US&page=1", []string{"Popular"}},
-		{"/movie/top_rated?language=en-US&page=1", []string{"Top Rated"}},
-		{"/movie/now_playing?language=en-US&page=1", []string{"Now Playing"}},
-		{"/movie/upcoming?language=en-US&page=1", []string{"Upcoming"}},
-		{"/discover/movie?with_genres=28&language=en-US&page=1&sort_by=popularity.desc", []string{"Action"}},
-		{"/discover/movie?with_genres=35&language=en-US&page=1&sort_by=popularity.desc", []string{"Comedy"}},
-		{"/discover/movie?with_genres=27&language=en-US&page=1&sort_by=popularity.desc", []string{"Horror"}},
-		{"/discover/movie?with_genres=878&language=en-US&page=1&sort_by=popularity.desc", []string{"Sci-Fi"}},
-		{"/discover/movie?with_genres=10749&language=en-US&page=1&sort_by=popularity.desc", []string{"Romance"}},
-		{"/discover/movie?with_genres=16&language=en-US&page=1&sort_by=popularity.desc", []string{"Animation"}},
-	}
-
-	for _, t := range tasks {
-		movies := fetchTMDB(t.endpoint, t.categories, "movie")
-		allMovies = append(allMovies, movies...)
-	}
+	allMovies := fetchTMDBTasks([]tmdbTask{
+		{"/trending/movie/day?language=en-US", []string{"Trending Now"}, "movie"},
+		{"/movie/popular?language=en-US&page=1", []string{"Popular"}, "movie"},
+		{"/movie/top_rated?language=en-US&page=1", []string{"Top Rated"}, "movie"},
+		{"/movie/now_playing?language=en-US&page=1", []string{"Now Playing"}, "movie"},
+		{"/movie/upcoming?language=en-US&page=1", []string{"Upcoming"}, "movie"},
+		{"/discover/movie?with_genres=28&language=en-US&page=1&sort_by=popularity.desc", []string{"Action"}, "movie"},
+		{"/discover/movie?with_genres=35&language=en-US&page=1&sort_by=popularity.desc", []string{"Comedy"}, "movie"},
+		{"/discover/movie?with_genres=27&language=en-US&page=1&sort_by=popularity.desc", []string{"Horror"}, "movie"},
+		{"/discover/movie?with_genres=878&language=en-US&page=1&sort_by=popularity.desc", []string{"Sci-Fi"}, "movie"},
+		{"/discover/movie?with_genres=10749&language=en-US&page=1&sort_by=popularity.desc", []string{"Romance"}, "movie"},
+		{"/discover/movie?with_genres=16&language=en-US&page=1&sort_by=popularity.desc", []string{"Animation"}, "movie"},
+	})
 
 	cacheMutex.Lock()
 	if len(allMovies) > 0 {
@@ -404,30 +369,18 @@ func updateTVShowsCache() {
 	defer tvRefreshMu.Unlock()
 
 	log.Println("Refreshing TV shows cache...")
-	var allShows []Movie
-
-	type task struct {
-		endpoint   string
-		categories []string
-	}
-
-	tasks := []task{
-		{"/trending/tv/day?language=en-US", []string{"Trending TV"}},
-		{"/tv/popular?language=en-US&page=1", []string{"Popular Shows"}},
-		{"/tv/top_rated?language=en-US&page=1", []string{"Top Rated Shows"}},
-		{"/tv/on_the_air?language=en-US&page=1", []string{"Now Airing"}},
-		{"/discover/tv?with_genres=10759&language=en-US&page=1&sort_by=popularity.desc", []string{"Action & Adventure"}},
-		{"/discover/tv?with_genres=18&language=en-US&page=1&sort_by=popularity.desc", []string{"Drama"}},
-		{"/discover/tv?with_genres=35&language=en-US&page=1&sort_by=popularity.desc", []string{"Comedy Shows"}},
-		{"/discover/tv?with_genres=9648&language=en-US&page=1&sort_by=popularity.desc", []string{"Mystery"}},
-		{"/discover/tv?with_genres=10765&language=en-US&page=1&sort_by=popularity.desc", []string{"Sci-Fi & Fantasy"}},
-		{"/discover/tv?with_genres=16&language=en-US&page=1&sort_by=popularity.desc", []string{"Anime"}},
-	}
-
-	for _, t := range tasks {
-		shows := fetchTMDB(t.endpoint, t.categories, "tv")
-		allShows = append(allShows, shows...)
-	}
+	allShows := fetchTMDBTasks([]tmdbTask{
+		{"/trending/tv/day?language=en-US", []string{"Trending TV"}, "tv"},
+		{"/tv/popular?language=en-US&page=1", []string{"Popular Shows"}, "tv"},
+		{"/tv/top_rated?language=en-US&page=1", []string{"Top Rated Shows"}, "tv"},
+		{"/tv/on_the_air?language=en-US&page=1", []string{"Now Airing"}, "tv"},
+		{"/discover/tv?with_genres=10759&language=en-US&page=1&sort_by=popularity.desc", []string{"Action & Adventure"}, "tv"},
+		{"/discover/tv?with_genres=18&language=en-US&page=1&sort_by=popularity.desc", []string{"Drama"}, "tv"},
+		{"/discover/tv?with_genres=35&language=en-US&page=1&sort_by=popularity.desc", []string{"Comedy Shows"}, "tv"},
+		{"/discover/tv?with_genres=9648&language=en-US&page=1&sort_by=popularity.desc", []string{"Mystery"}, "tv"},
+		{"/discover/tv?with_genres=10765&language=en-US&page=1&sort_by=popularity.desc", []string{"Sci-Fi & Fantasy"}, "tv"},
+		{"/discover/tv?with_genres=16&language=en-US&page=1&sort_by=popularity.desc", []string{"Anime"}, "tv"},
+	})
 
 	tvMutex.Lock()
 	if len(allShows) > 0 {
@@ -440,25 +393,19 @@ func updateTVShowsCache() {
 }
 
 func updatePopularCache() {
-	if popularRefreshMu.TryLock() == false {
+	if !popularRefreshMu.TryLock() {
 		log.Println("Popular cache refresh already in progress; skipping overlapping refresh")
 		return
 	}
 	defer popularRefreshMu.Unlock()
 
 	log.Println("Refreshing popular/new cache...")
-	var all []Movie
-
-	// Mix of trending movies + trending TV for "New & Popular"
-	movies := fetchTMDB("/trending/movie/week?language=en-US", []string{"Trending Movies"}, "movie")
-	tv := fetchTMDB("/trending/tv/week?language=en-US", []string{"Trending Shows"}, "tv")
-	newMovies := fetchTMDB("/movie/now_playing?language=en-US&page=1", []string{"New in Cinemas"}, "movie")
-	newTV := fetchTMDB("/tv/on_the_air?language=en-US&page=1", []string{"New Episodes"}, "tv")
-
-	all = append(all, movies...)
-	all = append(all, tv...)
-	all = append(all, newMovies...)
-	all = append(all, newTV...)
+	all := fetchTMDBTasks([]tmdbTask{
+		{"/trending/movie/week?language=en-US", []string{"Trending Movies"}, "movie"},
+		{"/trending/tv/week?language=en-US", []string{"Trending Shows"}, "tv"},
+		{"/movie/now_playing?language=en-US&page=1", []string{"New in Cinemas"}, "movie"},
+		{"/tv/on_the_air?language=en-US&page=1", []string{"New Episodes"}, "tv"},
+	})
 
 	popularMutex.Lock()
 	if len(all) > 0 {
@@ -475,7 +422,7 @@ func mediaMovieSourceHandler(w http.ResponseWriter, r *http.Request) {
 		writeMediaError(w, http.StatusBadRequest, "Invalid movie ID")
 		return
 	}
-	source, err := mediaSourceResolver.Resolve(r.Context(), mediaresolver.MediaRequest{Type: mediaresolver.Movie, ID: id})
+	source, err := mediaSourceResolver.Resolve(r.Context(), mediaresolver.MediaRequest{Type: mediaresolver.Movie, ID: id, Provider: "vixsrc"})
 	if err != nil {
 		log.Printf("[MediaResolver] movie resolution failed id=%s error=%v", id, err)
 		writeMediaError(w, http.StatusBadGateway, "Unable to resolve media source")
@@ -490,13 +437,73 @@ func mediaTVSourceHandler(w http.ResponseWriter, r *http.Request) {
 		writeMediaError(w, http.StatusBadRequest, "Invalid TV episode parameters")
 		return
 	}
-	source, err := mediaSourceResolver.Resolve(r.Context(), mediaresolver.MediaRequest{Type: mediaresolver.TV, ID: parts[0], Season: parts[1], Episode: parts[2]})
+	source, err := mediaSourceResolver.Resolve(r.Context(), mediaresolver.MediaRequest{Type: mediaresolver.TV, ID: parts[0], Season: parts[1], Episode: parts[2], Provider: "vixsrc"})
 	if err != nil {
 		log.Printf("[MediaResolver] TV resolution failed id=%s season=%s episode=%s error=%v", parts[0], parts[1], parts[2], err)
 		writeMediaError(w, http.StatusBadGateway, "Unable to resolve media source")
 		return
 	}
 	writeMediaJSON(w, http.StatusOK, map[string]any{"success": true, "type": "hls", "url": source})
+}
+
+func mediaProviderMovieSourceHandler(provider string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeMediaError(w, http.StatusMethodNotAllowed, "Method not allowed")
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/api/media/source/"+provider+"/movie/")
+		if !validMediaID(id) {
+			writeMediaError(w, http.StatusBadRequest, "Invalid movie ID")
+			return
+		}
+		source, err := mediaSourceResolver.Resolve(r.Context(), mediaresolver.MediaRequest{Type: mediaresolver.Movie, ID: id, Provider: provider})
+		if err != nil {
+			log.Printf("[MediaResolver] %s movie resolution failed id=%s error=%v", provider, id, err)
+			writeMediaError(w, http.StatusBadGateway, "Unable to resolve media source")
+			return
+		}
+		writeMediaJSON(w, http.StatusOK, map[string]any{"success": true, "type": "hls", "url": source})
+	}
+}
+
+func mediaProviderTVSourceHandler(provider string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeMediaError(w, http.StatusMethodNotAllowed, "Method not allowed")
+			return
+		}
+		prefix := "/api/media/source/" + provider + "/tv/"
+		parts := strings.Split(strings.Trim(r.URL.Path[len(prefix):], "/"), "/")
+		if len(parts) != 3 || !validMediaID(parts[0]) || !validMediaID(parts[1]) || !validMediaID(parts[2]) {
+			writeMediaError(w, http.StatusBadRequest, "Invalid TV episode parameters")
+			return
+		}
+		source, err := mediaSourceResolver.Resolve(r.Context(), mediaresolver.MediaRequest{Type: mediaresolver.TV, ID: parts[0], Season: parts[1], Episode: parts[2], Provider: provider})
+		if err != nil {
+			log.Printf("[MediaResolver] %s TV resolution failed id=%s season=%s episode=%s error=%v", provider, parts[0], parts[1], parts[2], err)
+			writeMediaError(w, http.StatusBadGateway, "Unable to resolve media source")
+			return
+		}
+		writeMediaJSON(w, http.StatusOK, map[string]any{"success": true, "type": "hls", "url": source})
+	}
+}
+
+func mediaProxyHandler(w http.ResponseWriter, r *http.Request) {
+	const prefix = "/api/media/proxy/"
+	if !strings.HasPrefix(r.URL.Path, prefix) {
+		writeMediaError(w, http.StatusNotFound, "Not found")
+		return
+	}
+	token := strings.Trim(strings.TrimPrefix(r.URL.Path, prefix), "/")
+	if token == "" {
+		writeMediaError(w, http.StatusBadRequest, "Invalid proxy token")
+		return
+	}
+	if err := mediaSourceResolver.Proxy(w, r, token); err != nil {
+		log.Printf("[MediaResolver] proxy failed: %v", err)
+		writeMediaError(w, http.StatusBadGateway, "Unable to proxy media source")
+	}
 }
 
 func validMediaID(s string) bool {
@@ -575,13 +582,6 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 	shows := cachedTVShows
 	tvMutex.RUnlock()
 
-	// Build a combined home feed:
-	// Pull the first page of each source and tag them with home-friendly category names.
-	type categoryOrder struct {
-		cat   string
-		type_ string
-	}
-
 	// Collect movies by category
 	moviesBycat := map[string][]Movie{}
 	for _, m := range movies {
@@ -623,12 +623,15 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 		{"Anime", "tv"},
 	}
 
-	// Rename "Trending Now" -> "Trending Movies" and "Trending TV" -> "Trending TV"
+	// Cache tags do not always match the Home row labels.
 	if items, ok := moviesBycat["Trending Now"]; ok {
 		moviesBycat["Trending Movies"] = append(moviesBycat["Trending Movies"], items...)
 	}
-	if items, ok := tvBycat["Trending TV"]; ok {
-		tvBycat["Trending TV"] = items
+	if items, ok := moviesBycat["Popular"]; ok {
+		moviesBycat["Popular Movies"] = append(moviesBycat["Popular Movies"], items...)
+	}
+	if items, ok := moviesBycat["Top Rated"]; ok {
+		moviesBycat["Top Rated Movies"] = append(moviesBycat["Top Rated Movies"], items...)
 	}
 
 	var combined []Movie
@@ -981,12 +984,26 @@ func main() {
 	http.HandleFunc("/api/search", searchHandler)
 	http.HandleFunc("/api/detail", detailHandler)
 	http.HandleFunc("/api/episodes", episodesHandler)
+	// Provider-specific resolver routes. Keep VixSrc as the default provider,
+	// while retaining the legacy routes below for backwards compatibility.
+	http.HandleFunc("/api/media/source/vixsrc/movie/", mediaProviderMovieSourceHandler("vixsrc"))
+	http.HandleFunc("/api/media/source/vixsrc/tv/", mediaProviderTVSourceHandler("vixsrc"))
+	http.HandleFunc("/api/media/source/vidking/movie/", mediaProviderMovieSourceHandler("vidking"))
+	http.HandleFunc("/api/media/source/vidking/tv/", mediaProviderTVSourceHandler("vidking"))
 	http.HandleFunc("/api/media/source/movie/", mediaMovieSourceHandler)
 	http.HandleFunc("/api/media/source/tv/", mediaTVSourceHandler)
+	http.HandleFunc("/api/media/proxy/", mediaProxyHandler)
 	http.Handle("/", http.FileServer(http.Dir("./static")))
 
+	server := &http.Server{
+		Addr:              ":8080",
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       60 * time.Second,
+		IdleTimeout:       90 * time.Second,
+	}
+
 	log.Println("Server listening on :8080 — open http://localhost:8080")
-	if err := http.ListenAndServe(":8080", nil); err != nil {
+	if err := server.ListenAndServe(); err != nil {
 		log.Fatal("Error starting server: ", err)
 	}
 }
