@@ -224,7 +224,7 @@
                         <rect x="3" y="4" width="18" height="6" rx="2"></rect><rect x="3" y="14" width="18" height="6" rx="2"></rect><path d="M7 7h.01M7 17h.01"></path>
                     </svg>
                     <div class="player-server-copy">
-                        <span class="player-server-label">Playback</span>
+                        <span class="player-server-label">Server</span>
                         <button type="button" class="player-server-trigger" id="player-server-trigger" aria-haspopup="listbox" aria-expanded="false">
                             <span id="player-server-current">VixSrc</span>
                             <svg class="player-server-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>
@@ -307,6 +307,24 @@
                 </div>
                 <span class="player-time" id="player-time">0:00 / 0:00</span>
                 <div class="player-controls-spacer"></div>
+                <div class="player-track-picker" id="player-audio-picker">
+                    <button type="button" class="player-track-trigger" id="player-audio-trigger" aria-haspopup="listbox" aria-expanded="false" aria-label="Audio">
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5Z"></path><path d="M15.5 8.5a5 5 0 0 1 0 7"></path><path d="M18.5 6a8.5 8.5 0 0 1 0 12"></path></svg>
+                        <span class="player-track-trigger-label">Audio</span>
+                        <span class="player-track-current" id="player-audio-current">Original</span>
+                        <svg class="player-track-chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                    </button>
+                    <div class="player-track-menu" id="player-audio-menu" role="listbox" aria-label="Audio tracks"></div>
+                </div>
+                <div class="player-track-picker" id="player-subtitle-picker">
+                    <button type="button" class="player-track-trigger" id="player-subtitle-trigger" aria-haspopup="listbox" aria-expanded="false" aria-label="Subtitles">
+                        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 5h16v14H4z"></path><path d="M7 10h3M14 10h3M7 14h5M15 14h2"></path></svg>
+                        <span class="player-track-trigger-label">Subtitles</span>
+                        <span class="player-track-current" id="player-subtitle-current">Off</span>
+                        <svg class="player-track-chevron" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                    </button>
+                    <div class="player-track-menu" id="player-subtitle-menu" role="listbox" aria-label="Subtitle tracks"></div>
+                </div>
                 <button class="player-icon-btn" id="player-fullscreen" aria-label="Fullscreen" title="Fullscreen">
                     <svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><polyline points="8 3 3 3 3 8"></polyline><polyline points="16 3 21 3 21 8"></polyline><polyline points="8 21 3 21 3 16"></polyline><polyline points="21 16 21 21 16 21"></polyline></svg>
                 </button>

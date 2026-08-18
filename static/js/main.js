@@ -34,6 +34,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const playerServerTrigger = document.getElementById('player-server-trigger');
     const playerServerCurrent = document.getElementById('player-server-current');
     const playerServerMenu    = document.getElementById('player-server-menu');
+    const playerAudioPicker   = document.getElementById('player-audio-picker');
+    const playerAudioTrigger  = document.getElementById('player-audio-trigger');
+    const playerAudioCurrent  = document.getElementById('player-audio-current');
+    const playerAudioMenu     = document.getElementById('player-audio-menu');
+    const playerSubtitlePicker  = document.getElementById('player-subtitle-picker');
+    const playerSubtitleTrigger = document.getElementById('player-subtitle-trigger');
+    const playerSubtitleCurrent = document.getElementById('player-subtitle-current');
+    const playerSubtitleMenu    = document.getElementById('player-subtitle-menu');
     const playerSeasonPicker  = document.getElementById('player-season-picker');
     const playerSeasonTrigger = document.getElementById('player-season-trigger');
     const playerSeasonCurrent = document.getElementById('player-season-current');
@@ -113,6 +121,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let vixHlsInstance        = null;
     let activePlayerServer   = 'vixsrc';
     let playerReady          = false;
+    let playerAudioTracks    = [];
+    let playerSubtitleTracks = [];
+    let playerAudioInitialized = false;
 
     // ─── My List (localStorage) ──────────────────────────────────────────────
     function getMyList() {
@@ -1059,6 +1070,121 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    function normalizeTrackLabel(track, fallback, index) {
+        const attrs = track?.attrs || {};
+        return track?.name || track?.lang || attrs.NAME || attrs.LANGUAGE || fallback || `Track ${index + 1}`;
+    }
+
+    function isEnglishTrack(track) {
+        const attrs = track?.attrs || {};
+        const value = String(track?.lang || attrs.LANGUAGE || track?.name || attrs.NAME || '').toLowerCase();
+        return /(^|[-_])en(g|us|gb|ca|au)?([_-]|$)/i.test(value) || /english/.test(value);
+    }
+
+    function isDefaultTrack(track) {
+        const attrs = track?.attrs || {};
+        return track?.default === true || track?.default === 'YES' || attrs.DEFAULT === 'YES' || track?.autoselect === true || attrs.AUTOSELECT === 'YES';
+    }
+
+    function chooseDefaultAudioIndex(tracks) {
+        if (!tracks.length) return -1;
+        const english = tracks.findIndex(isEnglishTrack);
+        if (english >= 0) return english;
+        const preferred = tracks.findIndex(isDefaultTrack);
+        return preferred >= 0 ? preferred : 0;
+    }
+
+    function renderTrackMenu(menu, tracks, currentIndex, type) {
+        if (!menu) return;
+        menu.innerHTML = '';
+        if (type === 'subtitle' && tracks.length) {
+            const off = document.createElement('button');
+            off.type = 'button';
+            off.role = 'option';
+            off.dataset.trackIndex = '-1';
+            off.setAttribute('aria-selected', currentIndex < 0 ? 'true' : 'false');
+            off.innerHTML = '<span><strong>Off</strong></span><svg class="track-option-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+            off.addEventListener('click', () => selectPlayerTrack(type, -1));
+            menu.appendChild(off);
+        }
+        if (!tracks.length) {
+            const empty = document.createElement('div');
+            empty.className = 'player-track-empty';
+            empty.textContent = type === 'audio' ? 'No alternate audio' : 'No subtitles available';
+            menu.appendChild(empty);
+            return;
+        }
+        tracks.forEach((track, index) => {
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.role = 'option';
+            button.dataset.trackIndex = String(index);
+            button.setAttribute('aria-selected', index === currentIndex ? 'true' : 'false');
+            button.innerHTML = `<span><strong>${escapeHtml(normalizeTrackLabel(track, type === 'audio' ? 'Original' : 'Subtitles', index))}</strong></span><svg class="track-option-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
+            button.addEventListener('click', () => selectPlayerTrack(type, index));
+            menu.appendChild(button);
+        });
+    }
+
+    function syncPlayerAudioMenu(index) {
+        if (!playerAudioCurrent) return;
+        const track = playerAudioTracks[index];
+        playerAudioCurrent.textContent = track ? normalizeTrackLabel(track, isEnglishTrack(track) ? 'English' : 'Original', index) : 'Original';
+        playerAudioMenu?.querySelectorAll('[data-track-index]').forEach(button => {
+            button.setAttribute('aria-selected', Number(button.dataset.trackIndex) === index ? 'true' : 'false');
+        });
+    }
+
+    function syncPlayerSubtitleMenu(index) {
+        if (!playerSubtitleCurrent) return;
+        playerSubtitleCurrent.textContent = index >= 0 && playerSubtitleTracks[index]
+            ? normalizeTrackLabel(playerSubtitleTracks[index], 'Subtitles', index)
+            : 'Off';
+        playerSubtitleMenu?.querySelectorAll('[data-track-index]').forEach(button => {
+            button.setAttribute('aria-selected', Number(button.dataset.trackIndex) === index ? 'true' : 'false');
+        });
+    }
+
+    function updatePlayerTrackMenus() {
+        const audioIndex = vixHlsInstance ? vixHlsInstance.audioTrack : -1;
+        const subtitleIndex = vixHlsInstance ? vixHlsInstance.subtitleTrack : -1;
+        renderTrackMenu(playerAudioMenu, playerAudioTracks, audioIndex, 'audio');
+        renderTrackMenu(playerSubtitleMenu, playerSubtitleTracks, subtitleIndex, 'subtitle');
+        syncPlayerAudioMenu(audioIndex);
+        syncPlayerSubtitleMenu(subtitleIndex);
+        const hasAudioChoices = playerAudioTracks.length > 1;
+        const hasSubtitleChoices = playerSubtitleTracks.length > 0;
+        if (playerAudioPicker) playerAudioPicker.style.display = hasAudioChoices ? '' : 'none';
+        if (playerSubtitlePicker) playerSubtitlePicker.style.display = hasSubtitleChoices ? '' : 'none';
+    }
+
+    function selectPlayerTrack(type, index) {
+        if (type === 'audio' && vixHlsInstance && playerAudioTracks[index]) {
+            vixHlsInstance.audioTrack = index;
+            playerAudioInitialized = true;
+            syncPlayerAudioMenu(index);
+        } else if (type === 'subtitle' && vixHlsInstance) {
+            vixHlsInstance.subtitleTrack = index;
+            syncPlayerSubtitleMenu(index);
+        }
+        playerAudioPicker?.classList.remove('open');
+        playerSubtitlePicker?.classList.remove('open');
+        playerAudioTrigger?.setAttribute('aria-expanded', 'false');
+        playerSubtitleTrigger?.setAttribute('aria-expanded', 'false');
+    }
+
+    function resetPlayerTracks() {
+        playerAudioTracks = [];
+        playerSubtitleTracks = [];
+        playerAudioInitialized = false;
+        if (playerAudioMenu) playerAudioMenu.innerHTML = '';
+        if (playerSubtitleMenu) playerSubtitleMenu.innerHTML = '';
+        if (playerAudioCurrent) playerAudioCurrent.textContent = 'Original';
+        if (playerSubtitleCurrent) playerSubtitleCurrent.textContent = 'Off';
+        if (playerAudioPicker) playerAudioPicker.style.display = 'none';
+        if (playerSubtitlePicker) playerSubtitlePicker.style.display = 'none';
+    }
+
     async function launchPlayer(movie, season, episode) {
         const requestId = ++playerRequestId;
         currentPlayerMovie = movie;
@@ -1096,6 +1222,7 @@ document.addEventListener('DOMContentLoaded', () => {
         }));
 
         stopVixPlayback();
+        resetPlayerTracks();
         resetPlayerUI(server);
         vixPlayer.style.display = 'none';
         vidkingPlayer.style.display = 'none';
@@ -1233,31 +1360,18 @@ document.addEventListener('DOMContentLoaded', () => {
                         vixHlsInstance.autoLevelEnabled = false;
                         vixHlsInstance.currentLevel = bestLevel;
 
-                        const audioTracks = vixHlsInstance.audioTracks || [];
-                        if (audioTracks.length > 0) {
-                            // Prefer the highest-quality audio track independently of video.
-                            // Bitrate is primary; channels and sample rate break ties.
-                            let bestAudio = 0;
-                            for (let i = 1; i < audioTracks.length; i++) {
-                                const a = audioTracks[i] || {};
-                                const b = audioTracks[bestAudio] || {};
-                                const aBitrate = Number(a.bitrate) || Number(a.attrs?.BANDWIDTH) || 0;
-                                const bBitrate = Number(b.bitrate) || Number(b.attrs?.BANDWIDTH) || 0;
-                                const aChannels = Number(a.channels) || Number(a.attrs?.CHANNELS?.match?.(/\d+/)?.[0]) || 0;
-                                const bChannels = Number(b.channels) || Number(b.attrs?.CHANNELS?.match?.(/\d+/)?.[0]) || 0;
-                                const aRate = Number(a.sampleRate) || Number(a.attrs?.['SAMPLE-RATE']) || 0;
-                                const bRate = Number(b.sampleRate) || Number(b.attrs?.['SAMPLE-RATE']) || 0;
-                                if (aBitrate > bBitrate ||
-                                    (aBitrate === bBitrate && aChannels > bChannels) ||
-                                    (aBitrate === bBitrate && aChannels === bChannels && aRate > bRate)) {
-                                    bestAudio = i;
-                                }
-                            }
-                            vixHlsInstance.audioTrack = bestAudio;
+                        playerAudioTracks = vixHlsInstance.audioTracks || [];
+                        playerSubtitleTracks = vixHlsInstance.subtitleTracks || [];
+                        if (playerAudioTracks.length > 0 && !playerAudioInitialized) {
+                            vixHlsInstance.audioTrack = chooseDefaultAudioIndex(playerAudioTracks);
+                            playerAudioInitialized = true;
                         }
+                        // Subtitles are intentionally off by default. The user can enable
+                        // any available track from the Subtitles menu.
+                        vixHlsInstance.subtitleTrack = -1;
+                        updatePlayerTrackMenus();
 
                         vixPlayer.muted = false;
-                        if (vixPlayer.volume === 0) vixPlayer.volume = 1;
 
                         const selected = levels[bestLevel];
                         console.info('[Player] Highest video quality selected; audio retained:', {
@@ -1276,27 +1390,31 @@ document.addEventListener('DOMContentLoaded', () => {
                 vixPlayer.addEventListener('canplay', finishReady, { once: true });
                 vixPlayer.addEventListener('loadeddata', finishReady, { once: true });
                 vixHlsInstance.on(Hls.Events.AUDIO_TRACKS_UPDATED, function() {
-                    const tracks = vixHlsInstance.audioTracks || [];
-                    if (tracks.length > 0) {
-                        let bestAudio = 0;
-                        for (let i = 1; i < tracks.length; i++) {
-                            const a = tracks[i] || {};
-                            const b = tracks[bestAudio] || {};
-                            const aBitrate = Number(a.bitrate) || Number(a.attrs?.BANDWIDTH) || 0;
-                            const bBitrate = Number(b.bitrate) || Number(b.attrs?.BANDWIDTH) || 0;
-                            const aChannels = Number(a.channels) || Number(a.attrs?.CHANNELS?.match?.(/\d+/)?.[0]) || 0;
-                            const bChannels = Number(b.channels) || Number(b.attrs?.CHANNELS?.match?.(/\d+/)?.[0]) || 0;
-                            const aRate = Number(a.sampleRate) || Number(a.attrs?.['SAMPLE-RATE']) || 0;
-                            const bRate = Number(b.sampleRate) || Number(b.attrs?.['SAMPLE-RATE']) || 0;
-                            if (aBitrate > bBitrate ||
-                                (aBitrate === bBitrate && aChannels > bChannels) ||
-                                (aBitrate === bBitrate && aChannels === bChannels && aRate > bRate)) {
-                                bestAudio = i;
-                            }
-                        }
-                        vixHlsInstance.audioTrack = bestAudio;
-                        vixPlayer.muted = false;
+                    if (requestId !== playerRequestId) return;
+                    playerAudioTracks = vixHlsInstance.audioTracks || [];
+                    if (playerAudioTracks.length > 0 && !playerAudioInitialized) {
+                        vixHlsInstance.audioTrack = chooseDefaultAudioIndex(playerAudioTracks);
+                        playerAudioInitialized = true;
                     }
+                    updatePlayerTrackMenus();
+                    vixPlayer.muted = false;
+                });
+
+                vixHlsInstance.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, function() {
+                    if (requestId !== playerRequestId) return;
+                    playerSubtitleTracks = vixHlsInstance.subtitleTracks || [];
+                    vixHlsInstance.subtitleTrack = -1;
+                    updatePlayerTrackMenus();
+                });
+
+                vixHlsInstance.on(Hls.Events.AUDIO_TRACK_SWITCHED, function() {
+                    if (requestId !== playerRequestId) return;
+                    syncPlayerAudioMenu(vixHlsInstance.audioTrack);
+                });
+
+                vixHlsInstance.on(Hls.Events.SUBTITLE_TRACK_SWITCH, function() {
+                    if (requestId !== playerRequestId) return;
+                    syncPlayerSubtitleMenu(vixHlsInstance.subtitleTrack);
                 });
 
                 vixHlsInstance.on(Hls.Events.ERROR, function(event, data) {
@@ -1357,6 +1475,26 @@ document.addEventListener('DOMContentLoaded', () => {
             if (currentPlayerMovie) launchPlayer(currentPlayerMovie, currentPlayerSeason, currentPlayerEpisode);
         });
     }
+    function toggleTrackPicker(picker, trigger) {
+        const open = picker.classList.toggle('open');
+        if (open) {
+            playerServerPicker?.classList.remove('open');
+            playerServerTrigger?.setAttribute('aria-expanded', 'false');
+            playerAudioPicker !== picker && playerAudioPicker?.classList.remove('open');
+            playerSubtitlePicker !== picker && playerSubtitlePicker?.classList.remove('open');
+        }
+        trigger.setAttribute('aria-expanded', open ? 'true' : 'false');
+    }
+
+    playerAudioTrigger?.addEventListener('click', e => {
+        e.stopPropagation();
+        toggleTrackPicker(playerAudioPicker, playerAudioTrigger);
+    });
+    playerSubtitleTrigger?.addEventListener('click', e => {
+        e.stopPropagation();
+        toggleTrackPicker(playerSubtitlePicker, playerSubtitleTrigger);
+    });
+
     playerServerTrigger?.addEventListener('click', (e) => {
         e.stopPropagation();
         const open = playerServerPicker.classList.toggle('open');
@@ -1379,6 +1517,10 @@ document.addEventListener('DOMContentLoaded', () => {
     document.addEventListener('click', () => {
         playerServerPicker?.classList.remove('open');
         playerServerTrigger?.setAttribute('aria-expanded', 'false');
+        playerAudioPicker?.classList.remove('open');
+        playerAudioTrigger?.setAttribute('aria-expanded', 'false');
+        playerSubtitlePicker?.classList.remove('open');
+        playerSubtitleTrigger?.setAttribute('aria-expanded', 'false');
         playerSeasonPicker?.classList.remove('open');
         playerSeasonTrigger?.setAttribute('aria-expanded', 'false');
     });
