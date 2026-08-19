@@ -1,6 +1,7 @@
 package mediaresolver
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -37,7 +38,6 @@ type hlsCandidate struct {
 	url, contentType string
 	status           int64
 	headers          http.Header
-	master           bool
 }
 
 type Config struct {
@@ -46,7 +46,21 @@ type Config struct {
 	BrowserTimeout, SourceResolutionTimeout time.Duration
 	MaxBrowserSessions                      int
 	BrowserExecutable                       string
+	// SessionTTL is the sliding lifetime of a proxy session. Every proxied
+	// request extends it, so playback is not cut off mid-stream.
+	// Defaults to 4 hours when <= 0.
+	SessionTTL time.Duration
 }
+
+// playbackHeaders are the browser headers captured during resolution and
+// replayed against the upstream so the CDN sees the same playback context.
+var playbackHeaders = []string{"User-Agent", "Referer", "Origin", "Cookie", "Accept", "Accept-Language"}
+
+// maxManifestBytes caps upstream manifest bodies. Anything larger is rejected
+// rather than silently truncated into a corrupt playlist.
+const maxManifestBytes = 8 << 20
+
+const defaultSessionTTL = 4 * time.Hour
 
 type proxySession struct {
 	source    string
@@ -54,12 +68,17 @@ type proxySession struct {
 	allowed   map[string]bool
 	expiresAt time.Time
 }
+
 type Resolver struct {
 	cfg      Config
 	sem      chan struct{}
 	mu       sync.Mutex
 	closed   bool
 	sessions map[string]*proxySession
+	// transport is shared across proxy requests for connection reuse.
+	transport *http.Transport
+	// blockCache memoizes per-hostname SSRF checks (hostname -> blocked).
+	blockCache sync.Map
 }
 
 func New(cfg Config) (*Resolver, error) {
@@ -77,9 +96,24 @@ func New(cfg Config) (*Resolver, error) {
 		if e != nil || u.Scheme != "https" || u.Host == "" {
 			return nil, fmt.Errorf("%s must be an HTTPS origin", k)
 		}
+		if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+			return nil, fmt.Errorf("%s must be a bare HTTPS origin (no path, query, or fragment)", k)
+		}
 	}
-	return &Resolver{cfg: cfg, sem: make(chan struct{}, cfg.MaxBrowserSessions), sessions: make(map[string]*proxySession)}, nil
+	return &Resolver{
+		cfg:      cfg,
+		sem:      make(chan struct{}, cfg.MaxBrowserSessions),
+		sessions: make(map[string]*proxySession),
+		transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			MaxIdleConns:          64,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		},
+	}, nil
 }
+
 func (r *Resolver) Close() {
 	r.mu.Lock()
 	r.closed = true
@@ -87,29 +121,41 @@ func (r *Resolver) Close() {
 	r.mu.Unlock()
 }
 
+func (r *Resolver) isClosed() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closed
+}
+
+func (r *Resolver) sessionTTL() time.Duration {
+	if r.cfg.SessionTTL > 0 {
+		return r.cfg.SessionTTL
+	}
+	return defaultSessionTTL
+}
+
 func (r *Resolver) Resolve(parent context.Context, req MediaRequest) (string, error) {
 	if err := validateRequest(req); err != nil {
 		return "", err
 	}
-	// Cached browser context cannot be reused safely, so only cache the raw URL for diagnostics.
-	// A fresh proxy session is created for every Resolve call.
+	// Fail fast before queueing on the browser semaphore so callers of a
+	// closed resolver do not block until their context expires.
+	if r.isClosed() {
+		return "", errors.New("resolver is closed")
+	}
+	// A fresh browser run (and proxy session) is created for every Resolve
+	// call; cached browser contexts cannot be reused safely across calls.
 	select {
 	case r.sem <- struct{}{}:
 		defer func() { <-r.sem }()
 	case <-parent.Done():
 		return "", parent.Err()
 	}
-	r.mu.Lock()
-	closed := r.closed
-	r.mu.Unlock()
-	if closed {
-		return "", errors.New("resolver is closed")
-	}
 	target, err := r.targetURL(req)
 	if err != nil {
 		return "", err
 	}
-	log.Printf("[MediaResolver] Resolving %s", target)
+	log.Printf("[MediaResolver] Resolving %s", redactQuery(target))
 	ctx, cancel := context.WithTimeout(parent, r.cfg.SourceResolutionTimeout)
 	defer cancel()
 	source, headers, allowed, err := r.resolveInBrowser(ctx, target)
@@ -125,7 +171,7 @@ func (r *Resolver) Resolve(parent context.Context, req MediaRequest) (string, er
 
 func (r *Resolver) targetURL(req MediaRequest) (string, error) {
 	origin := r.cfg.TargetOrigin
-	if strings.EqualFold(req.Provider, "vidking") {
+	if strings.EqualFold(strings.TrimSpace(req.Provider), "vidking") {
 		origin = r.cfg.VidKingOrigin
 	}
 	base, err := url.Parse(origin)
@@ -141,7 +187,7 @@ func (r *Resolver) targetURL(req MediaRequest) (string, error) {
 	default:
 		return "", errors.New("unsupported media type")
 	}
-	if strings.EqualFold(req.Provider, "vidking") {
+	if strings.EqualFold(strings.TrimSpace(req.Provider), "vidking") {
 		if req.Type == Movie {
 			p = "/embed/movie/" + req.ID
 		} else {
@@ -179,7 +225,6 @@ func (r *Resolver) resolveInBrowser(parent context.Context, target string) (stri
 	candidates := make([]hlsCandidate, 0, 8)
 	requestHeaders := make(map[string]http.Header)
 	hostHeaders := make(map[string]http.Header)
-	candidateByRequest := make(map[network.RequestID]int)
 
 	chromedp.ListenTarget(ctx, func(ev any) {
 		e, ok := ev.(*network.EventResponseReceived)
@@ -188,11 +233,11 @@ func (r *Resolver) resolveInBrowser(parent context.Context, target string) (stri
 		}
 		mu.Lock()
 		h := cloneHeader(requestHeaders[e.Response.URL])
+		delete(requestHeaders, e.Response.URL) // consumed; keep the map bounded
 		c := hlsCandidate{url: e.Response.URL, contentType: e.Response.MimeType, status: e.Response.Status, headers: h}
 		candidates = append(candidates, c)
-		candidateByRequest[e.RequestID] = len(candidates) - 1
 		mu.Unlock()
-		log.Printf("[MediaResolver] HLS source detected url=%s status=%d mime=%s", c.url, c.status, c.contentType)
+		log.Printf("[MediaResolver] HLS source detected url=%s status=%d mime=%s", redactQuery(c.url), c.status, c.contentType)
 	})
 
 	chromedp.ListenTarget(ctx, func(ev any) {
@@ -215,7 +260,11 @@ func (r *Resolver) resolveInBrowser(parent context.Context, target string) (stri
 		}
 		host := strings.ToLower(parsed.Host)
 		mu.Lock()
-		requestHeaders[e.Request.URL] = cloneHeader(h)
+		// Cap the per-URL header map: long-lived pages can issue thousands of
+		// requests and most are never matched to an HLS response.
+		if len(requestHeaders) < 2048 {
+			requestHeaders[e.Request.URL] = cloneHeader(h)
+		}
 		// Media CDNs may put the useful Cookie/Referer context on a later
 		// segment request rather than the initial .m3u8 request. Retain the
 		// latest safe browser headers per host so the proxy can reproduce the
@@ -241,8 +290,7 @@ func (r *Resolver) resolveInBrowser(parent context.Context, target string) (stri
 		// connection. A second navigation in the same isolated browser context
 		// is safe and lets Chromium establish a fresh connection. Do not retry
 		// arbitrary application errors indefinitely.
-		if !strings.Contains(strings.ToLower(msg), "err_connection_reset") &&
-			!strings.Contains(strings.ToLower(msg), "net::err_connection_reset") {
+		if !strings.Contains(strings.ToLower(msg), "err_connection_reset") {
 			break
 		}
 		select {
@@ -272,23 +320,23 @@ func (r *Resolver) resolveInBrowser(parent context.Context, target string) (stri
 		timer.Stop()
 		return "", nil, nil, parent.Err()
 	}
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
 	for {
 		mu.Lock()
 		c := chooseCandidate(candidates)
 		if c.url != "" {
 			merged := cloneHeader(c.headers)
+			allowed := map[string]bool{}
 			if u, e := url.Parse(c.url); e == nil {
 				if fallback := hostHeaders[strings.ToLower(u.Host)]; fallback != nil {
 					merged = mergeHeaders(merged, fallback)
 				}
-			}
-			allowed := map[string]bool{}
-			if u, e := url.Parse(c.url); e == nil {
 				allowed[strings.ToLower(u.Host)] = true
 			}
 			if ref := merged.Get("Referer"); ref != "" {
-				if u, e := url.Parse(ref); e == nil && u.Host != "" {
-					allowed[strings.ToLower(u.Host)] = true
+				if ru, e := url.Parse(ref); e == nil && ru.Host != "" {
+					allowed[strings.ToLower(ru.Host)] = true
 				}
 			}
 			mu.Unlock()
@@ -298,10 +346,11 @@ func (r *Resolver) resolveInBrowser(parent context.Context, target string) (stri
 		select {
 		case <-parent.Done():
 			return "", nil, nil, parent.Err()
-		case <-time.After(200 * time.Millisecond):
+		case <-ticker.C:
 		}
 	}
 }
+
 func isPotentialHLS(raw, mime string) bool {
 	u, e := url.Parse(raw)
 	if e != nil || u.Scheme != "https" || u.Host == "" {
@@ -311,11 +360,13 @@ func isPotentialHLS(raw, mime string) bool {
 	m := strings.ToLower(strings.TrimSpace(strings.Split(mime, ";")[0]))
 	return strings.HasSuffix(p, ".m3u8") || m == "application/vnd.apple.mpegurl" || m == "application/x-mpegurl" || m == "audio/mpegurl"
 }
+
 func chooseCandidate(cs []hlsCandidate) hlsCandidate {
-	// between ResponseReceived/LoadingFinished and cause the provider-specific
-	// "invalid context" error. Instead, choose the URL that conventionally
-	// represents the master playlist. VixSrc exposes its master as /playlist/,
-	// while other providers commonly use /master.m3u8 or /manifest.m3u8.
+	// Probing variant playlists between ResponseReceived and LoadingFinished
+	// can trigger provider-specific "invalid context" errors. Instead, choose
+	// the URL that conventionally represents the master playlist. VixSrc
+	// exposes its master as /playlist/, while other providers commonly use
+	// /master.m3u8 or /manifest.m3u8.
 	bestScore := -1
 	var best hlsCandidate
 	for i := len(cs) - 1; i >= 0; i-- {
@@ -346,6 +397,7 @@ func chooseCandidate(cs []hlsCandidate) hlsCandidate {
 	}
 	return best
 }
+
 func validateRequest(r MediaRequest) error {
 	switch r.Type {
 	case Movie:
@@ -359,11 +411,14 @@ func validateRequest(r MediaRequest) error {
 	default:
 		return errors.New("unsupported media type")
 	}
-	if r.Provider != "" && r.Provider != "vixsrc" && r.Provider != "vidking" {
+	switch strings.ToLower(strings.TrimSpace(r.Provider)) {
+	case "", "vixsrc", "vidking":
+		return nil
+	default:
 		return errors.New("unsupported provider")
 	}
-	return nil
 }
+
 func validNumeric(s string) bool {
 	if s == "" || len(s) > 20 {
 		return false
@@ -375,6 +430,7 @@ func validNumeric(s string) bool {
 	}
 	return true
 }
+
 func (r *Resolver) newSession(source string, headers http.Header, allowed map[string]bool) (string, error) {
 	b := make([]byte, 24)
 	if _, err := rand.Read(b); err != nil {
@@ -384,14 +440,20 @@ func (r *Resolver) newSession(source string, headers http.Header, allowed map[st
 	now := time.Now()
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// A Resolve that was already in flight when Close ran must not re-insert
+	// sessions into the cleared map (they would leak forever).
+	if r.closed {
+		return "", errors.New("resolver is closed")
+	}
 	for tok, session := range r.sessions {
 		if now.After(session.expiresAt) {
 			delete(r.sessions, tok)
 		}
 	}
-	r.sessions[token] = &proxySession{source: source, headers: cloneHeader(headers), allowed: allowed, expiresAt: now.Add(10 * time.Minute)}
+	r.sessions[token] = &proxySession{source: source, headers: cloneHeader(headers), allowed: allowed, expiresAt: now.Add(r.sessionTTL())}
 	return token, nil
 }
+
 func cloneHeader(in http.Header) http.Header {
 	out := make(http.Header)
 	for k, v := range in {
@@ -404,7 +466,7 @@ func cloneHeader(in http.Header) http.Header {
 
 func mergeHeaders(primary, fallback http.Header) http.Header {
 	out := cloneHeader(primary)
-	for _, key := range []string{"User-Agent", "Referer", "Origin", "Cookie", "Accept", "Accept-Language"} {
+	for _, key := range playbackHeaders {
 		if out.Get(key) == "" && fallback.Get(key) != "" {
 			out.Set(key, fallback.Get(key))
 		}
@@ -441,8 +503,8 @@ func mergeResponseCookies(headers http.Header, cookies []*http.Cookie) {
 // Proxy serves HLS manifests and media resources through the server. It rewrites
 // manifest URIs so the browser never contacts the provider/CDN directly.
 func (r *Resolver) Proxy(w http.ResponseWriter, req *http.Request, token string) error {
-	if req.Method != "GET" && req.Method != "HEAD" {
-		return fmt.Errorf("method not allowed")
+	if req.Method != http.MethodGet && req.Method != http.MethodHead {
+		return errors.New("method not allowed")
 	}
 	r.mu.Lock()
 	s, ok := r.sessions[token]
@@ -452,8 +514,11 @@ func (r *Resolver) Proxy(w http.ResponseWriter, req *http.Request, token string)
 	}
 	if !ok {
 		r.mu.Unlock()
-		return fmt.Errorf("proxy session expired")
+		return errors.New("proxy session expired")
 	}
+	// Sliding expiration: active playback keeps the session alive. Without
+	// this, long movies or live streams would die at the fixed expiry.
+	s.expiresAt = time.Now().Add(r.sessionTTL())
 	source := s.source
 	sessionHeaders := cloneHeader(s.headers)
 	allowed := cloneAllowed(s.allowed)
@@ -464,23 +529,38 @@ func (r *Resolver) Proxy(w http.ResponseWriter, req *http.Request, token string)
 	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme != "https" || u.Host == "" {
-		return fmt.Errorf("invalid upstream URL")
+		return errors.New("invalid upstream URL")
 	}
 	host := strings.ToLower(u.Host)
 	if !allowed[host] {
-		return fmt.Errorf("upstream host not allowed")
+		return errors.New("upstream host not allowed")
 	}
-	if blockedUpstreamHost(u.Hostname()) {
-		return fmt.Errorf("upstream host blocked")
+	if r.blockedUpstreamHost(u.Hostname()) {
+		return errors.New("upstream host blocked")
 	}
 	client := &http.Client{
-		Timeout: 60 * time.Second,
+		Transport: r.transport,
+		Timeout:   60 * time.Second,
 		CheckRedirect: func(next *http.Request, via []*http.Request) error {
 			nu := next.URL
-			if nu == nil || nu.Scheme != "https" || nu.Host == "" || !allowed[strings.ToLower(nu.Host)] || blockedUpstreamHost(nu.Hostname()) {
+			if nu == nil || nu.Scheme != "https" || nu.Host == "" || r.blockedUpstreamHost(nu.Hostname()) {
 				return http.ErrUseLastResponse
 			}
-			for _, k := range []string{"User-Agent", "Referer", "Origin", "Cookie", "Accept", "Accept-Language"} {
+			nhost := strings.ToLower(nu.Host)
+			if !allowed[nhost] {
+				// CDNs commonly 302 manifests/segments to edge hosts. Refusing
+				// the redirect would hand the raw Location back to the browser,
+				// which would then contact the CDN directly. Trust redirects
+				// from an already-allowed host and remember the edge host so
+				// later segment requests to it are allowed too.
+				r.mu.Lock()
+				if current := r.sessions[token]; current != nil {
+					current.allowed[nhost] = true
+				}
+				r.mu.Unlock()
+				allowed[nhost] = true
+			}
+			for _, k := range playbackHeaders {
 				if v := sessionHeaders.Get(k); v != "" {
 					next.Header.Set(k, v)
 				}
@@ -492,7 +572,7 @@ func (r *Resolver) Proxy(w http.ResponseWriter, req *http.Request, token string)
 	if err != nil {
 		return err
 	}
-	for _, k := range []string{"User-Agent", "Referer", "Origin", "Cookie", "Accept", "Accept-Language"} {
+	for _, k := range playbackHeaders {
 		if v := sessionHeaders.Get(k); v != "" {
 			upstream.Header.Set(k, v)
 		}
@@ -502,9 +582,10 @@ func (r *Resolver) Proxy(w http.ResponseWriter, req *http.Request, token string)
 			upstream.Header.Set(k, v)
 		}
 	}
-	// Never forward the browser's compression negotiation to the upstream
-	// HLS endpoint. The proxy must receive a plain-text manifest so it can
-	// safely rewrite nested playlist/segment URLs before returning it.
+	// Ask the upstream HLS endpoint for an uncompressed response. The proxy
+	// must receive a plain-text manifest so it can safely rewrite nested
+	// playlist/segment URLs before returning it. (Edges that ignore this and
+	// send gzip anyway are handled below.)
 	upstream.Header.Set("Accept-Encoding", "identity")
 	resp, err := client.Do(upstream)
 	if err != nil {
@@ -528,16 +609,29 @@ func (r *Resolver) Proxy(w http.ResponseWriter, req *http.Request, token string)
 	isManifest := strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "mpegurl") || strings.HasSuffix(strings.ToLower(u.Path), ".m3u8")
 	if !isManifest {
 		w.WriteHeader(resp.StatusCode)
-		if req.Method != "HEAD" {
+		if req.Method != http.MethodHead {
 			_, _ = io.Copy(w, resp.Body)
 		}
 		return nil
 	}
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
+	reader := resp.Body
+	if strings.EqualFold(strings.TrimSpace(resp.Header.Get("Content-Encoding")), "gzip") {
+		gz, gzErr := gzip.NewReader(resp.Body)
+		if gzErr != nil {
+			return fmt.Errorf("upstream returned an invalid gzip manifest: %w", gzErr)
+		}
+		defer gz.Close()
+		reader = gz
+	}
+	data, err := io.ReadAll(io.LimitReader(reader, maxManifestBytes+1))
 	if err != nil {
 		return err
 	}
+	if len(data) > maxManifestBytes {
+		return errors.New("upstream HLS manifest exceeds size limit")
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		w.Header().Del("Content-Length") // length no longer matches after decompression
 		w.WriteHeader(resp.StatusCode)
 		_, _ = w.Write(data)
 		return nil
@@ -550,31 +644,56 @@ func (r *Resolver) Proxy(w http.ResponseWriter, req *http.Request, token string)
 	if len(discovered) > 0 {
 		r.mu.Lock()
 		if current := r.sessions[token]; current != nil {
-			for host := range discovered {
-				current.allowed[host] = true
+			for h := range discovered {
+				current.allowed[h] = true
 			}
 		}
 		r.mu.Unlock()
 	}
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Del("Content-Length")
+	w.Header().Del("Content-Range")
 	w.WriteHeader(http.StatusOK)
-	if req.Method != "HEAD" {
+	if req.Method != http.MethodHead {
 		_, _ = io.WriteString(w, rewritten)
 	}
 	return nil
 }
-func blockedUpstreamHost(host string) bool {
+
+func isBlockedIP(ip net.IP) bool {
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
+}
+
+// blockedUpstreamHost reports whether a host must not be fetched upstream.
+// Besides literal IP checks it resolves hostnames so that DNS names pointing
+// at loopback/private addresses (e.g. 127.0.0.1.nip.io) cannot bypass the
+// SSRF guard. Failures fail closed but are not cached.
+func (r *Resolver) blockedUpstreamHost(host string) bool {
 	host = strings.TrimSpace(strings.ToLower(host))
 	host = strings.Trim(host, "[]")
 	if host == "" || host == "localhost" {
 		return true
 	}
-	ip := net.ParseIP(host)
-	if ip == nil {
-		return false
+	if ip := net.ParseIP(host); ip != nil {
+		return isBlockedIP(ip)
 	}
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()
+	if v, ok := r.blockCache.Load(host); ok {
+		return v.(bool)
+	}
+	ips, err := net.DefaultResolver.LookupIP(context.Background(), "ip", host)
+	if err != nil || len(ips) == 0 {
+		return true // fail closed
+	}
+	blocked := false
+	for _, ip := range ips {
+		if isBlockedIP(ip) {
+			blocked = true
+			break
+		}
+	}
+	r.blockCache.Store(host, blocked)
+	return blocked
 }
 
 func cloneAllowed(in map[string]bool) map[string]bool {
@@ -583,6 +702,18 @@ func cloneAllowed(in map[string]bool) map[string]bool {
 		out[k] = v
 	}
 	return out
+}
+
+// redactQuery strips query strings (which often carry signed auth tokens)
+// from URLs before they are written to logs.
+func redactQuery(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "(unparseable URL)"
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	return u.String()
 }
 
 var uriAttrRE = regexp.MustCompile(`URI="([^"]+)"`)
