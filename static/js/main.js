@@ -56,6 +56,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const playerTimeDuration  = document.getElementById('player-time-duration');
     const playerMute          = document.getElementById('player-mute');
     const playerVolume        = document.getElementById('player-volume');
+    const playerVolumeIcon    = document.getElementById('player-volume-icon');
     const playerSkipBack      = document.getElementById('player-skip-back');
     const playerSkipForward   = document.getElementById('player-skip-forward');
     const playerFullscreen    = document.getElementById('player-fullscreen');
@@ -101,6 +102,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Nav links
     const navLinks = document.querySelectorAll('.nav-links a[data-page]');
+    const mobileNavToggle     = document.getElementById('mobile-nav-toggle');
+    const primaryNavigation   = document.getElementById('primary-navigation');
+    const appToast            = document.getElementById('app-toast');
 
     // ─── State ───────────────────────────────────────────────────────────────
     let currentPage       = 'home';
@@ -108,6 +112,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let heroIndex         = 0;
     let heroRotateTimer   = null;
     let controlsHideTimer = null;
+    let playerCloseTimer  = null;
     let searchDebounce    = null;
     let searchRequestId   = 0;
     let catalogRequestId  = 0;
@@ -126,6 +131,9 @@ document.addEventListener('DOMContentLoaded', () => {
     let playerAudioTracks    = [];
     let playerSubtitleTracks = [];
     let playerAudioInitialized = false;
+    let pendingResumePosition = 0;
+    let lastSavedPlaybackSecond = 0;
+    let toastTimer = null;
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
     function escapeHtml(value) {
@@ -140,6 +148,13 @@ document.addEventListener('DOMContentLoaded', () => {
             || playerModal.classList.contains('show')
             || searchOverlay.classList.contains('show');
         document.body.style.overflow = lock ? 'hidden' : '';
+    }
+    function showToast(message) {
+        if (!appToast) return;
+        clearTimeout(toastTimer);
+        appToast.textContent = message;
+        appToast.classList.add('show');
+        toastTimer = setTimeout(() => appToast.classList.remove('show'), 2600);
     }
 
     // ─── My List (localStorage) ──────────────────────────────────────────────
@@ -177,8 +192,16 @@ document.addEventListener('DOMContentLoaded', () => {
     navLinks.forEach(link => {
         link.addEventListener('click', e => {
             e.preventDefault();
+            primaryNavigation?.classList.remove('open');
+            mobileNavToggle?.setAttribute('aria-expanded', 'false');
             switchPage(link.dataset.page);
         });
+    });
+
+    mobileNavToggle?.addEventListener('click', () => {
+        const open = primaryNavigation?.classList.toggle('open');
+        mobileNavToggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        mobileNavToggle.setAttribute('aria-label', open ? 'Close navigation' : 'Open navigation');
     });
 
     function setActiveNav(page) {
@@ -345,6 +368,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const added = toggleMyList(movie);
             heroAddList.classList.toggle('in-list', added);
             heroAddList.querySelector('svg').style.transform = added ? 'rotate(45deg)' : '';
+            showToast(added ? `${movie.title} added to My List` : `${movie.title} removed from My List`);
         };
         const inList = isInMyList(movie);
         heroAddList.classList.toggle('in-list', inList);
@@ -602,6 +626,7 @@ document.addEventListener('DOMContentLoaded', () => {
             detailListIconCheck.style.display = added ? '' : 'none';
             detailAddList.classList.toggle('in-list', added);
             detailAddList.title = added ? 'Remove from My List' : 'Add to My List';
+            showToast(added ? `${movie.title} added to My List` : `${movie.title} removed from My List`);
         };
 
         // Show modal
@@ -1036,12 +1061,18 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         catch { return { season: 1, episode: 1 }; }
     }
-    function saveProgress(movie, season, episode) {
+    function saveProgress(movie, season, episode, position) {
         try {
             const prog = JSON.parse(localStorage.getItem('gsflix_progress') || '{}');
             const key = mediaKey(movie);
+            const previous = prog[key] || {};
+            const sameEpisode = previous.season === season && previous.episode === episode;
             delete prog[movie.id];
-            prog[key] = { season, episode };
+            prog[key] = {
+                season,
+                episode,
+                position: Number.isFinite(position) ? Math.max(0, position) : (sameEpisode ? previous.position || 0 : 0)
+            };
             localStorage.setItem('gsflix_progress', JSON.stringify(prog));
         } catch (e) { console.warn('Could not save playback progress:', e); }
     }
@@ -1221,10 +1252,16 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     async function launchPlayer(movie, season, episode) {
+		clearTimeout(playerCloseTimer);
+		playerCloseTimer = null;
         const requestId = ++playerRequestId;
         currentPlayerMovie = movie;
         currentPlayerSeason = season || 1;
         currentPlayerEpisode = episode || 1;
+		const savedProgress = getProgress(movie);
+		pendingResumePosition = savedProgress.season === currentPlayerSeason && savedProgress.episode === currentPlayerEpisode
+			? Number(savedProgress.position) || 0 : 0;
+		lastSavedPlaybackSecond = 0;
 
         if (movie.type === 'tv') {
             playerNextEp.style.display = 'flex';
@@ -1267,6 +1304,7 @@ document.addEventListener('DOMContentLoaded', () => {
         stopVixPlayback();
         resetPlayerTracks();
         resetPlayerUI();
+        vixPlayer.playbackRate = 1;
         vixPlayer.__dbgTimeLogged = false;
         vixPlayer.style.display = 'block';
 
@@ -1316,23 +1354,6 @@ document.addEventListener('DOMContentLoaded', () => {
         vixPlayer.onerror = null;
     }
 
-    function pickHighestLevel(hls) {
-        const levels = hls?.levels || [];
-        let bestLevel = -1;
-        for (let i = 0; i < levels.length; i++) {
-            const current = levels[i] || {};
-            const best = bestLevel >= 0 ? levels[bestLevel] : null;
-            if (!best ||
-                (current.height || 0) > (best.height || 0) ||
-                ((current.height || 0) === (best.height || 0) && (current.width || 0) > (best.width || 0)) ||
-                ((current.height || 0) === (best.height || 0) && (current.width || 0) === (best.width || 0) &&
-                 (current.bitrate || 0) > (best.bitrate || 0))) {
-                bestLevel = i;
-            }
-        }
-        return bestLevel;
-    }
-
     function applyPlayerTracks(provider) {
         if (!vixHlsInstance) return;
         playerAudioTracks = vixHlsInstance.audioTracks || [];
@@ -1350,6 +1371,10 @@ document.addEventListener('DOMContentLoaded', () => {
     function loadVixSource(url, requestId, provider = 'vixsrc') {
         return new Promise((resolve, reject) => {
             let settled = false;
+			const playbackReadinessEvents = ['loadeddata', 'canplay', 'playing', 'loadedmetadata'];
+			const cleanupReadinessListeners = () => {
+				playbackReadinessEvents.forEach(event => vixPlayer.removeEventListener(event, tryStartPlayback));
+			};
             const readyTimeout = setTimeout(() => {
                 settleErr(new Error('Playback timed out while loading the stream'));
             }, 25000);
@@ -1358,6 +1383,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (settled) return;
                 settled = true;
                 clearTimeout(readyTimeout);
+				cleanupReadinessListeners();
                 if (requestId !== playerRequestId) {
                     resolve();
                     return;
@@ -1374,6 +1400,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 if (settled) return;
                 settled = true;
                 clearTimeout(readyTimeout);
+				cleanupReadinessListeners();
                 reject(err instanceof Error ? err : new Error(String(err)));
             };
 
@@ -1393,14 +1420,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 settleOk();
             };
 
-            const applyInitialQuality = () => {
-                if (!vixHlsInstance) return;
-                const bestLevel = pickHighestLevel(vixHlsInstance);
-                if (bestLevel < 0) return;
-                vixHlsInstance.autoLevelEnabled = false;
-                vixHlsInstance.currentLevel = bestLevel;
-            };
-
             vixPlayer.onerror = () => settleErr(new Error('The resolved HLS source could not be loaded by the browser'));
             vixPlayer.addEventListener('loadeddata', tryStartPlayback);
             vixPlayer.addEventListener('canplay', tryStartPlayback);
@@ -1418,9 +1437,21 @@ document.addEventListener('DOMContentLoaded', () => {
                     }
                 });
 
-                vixHlsInstance.on(Hls.Events.MANIFEST_PARSED, function() {
+                vixHlsInstance.on(Hls.Events.MANIFEST_PARSED, function(event, data) {
                     if (requestId !== playerRequestId) return;
-                    applyInitialQuality();
+                    
+                    if (data.levels && data.levels.length > 0) {
+                        let highestLevelIndex = 0;
+                        let maxBitrate = 0;
+                        for (let i = 0; i < data.levels.length; i++) {
+                            if (data.levels[i].bitrate > maxBitrate) {
+                                maxBitrate = data.levels[i].bitrate;
+                                highestLevelIndex = i;
+                            }
+                        }
+                        vixHlsInstance.currentLevel = highestLevelIndex;
+                    }
+
                     applyPlayerTracks(provider);
                     if (provider !== 'vidking') {
                         vixHlsInstance.subtitleTrack = -1;
@@ -1478,7 +1509,6 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             if (vixPlayer.canPlayType('application/vnd.apple.mpegurl')) {
-                vixPlayer.addEventListener('loadedmetadata', tryStartPlayback);
                 vixPlayer.src = url;
                 return;
             }
@@ -1524,6 +1554,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     playerEpListBtn.addEventListener('click', () => {
         playerEpPanel.classList.add('show');
+        playerEpListBtn.setAttribute('aria-expanded', 'true');
         loadPlayerEpisodesPanel();
     });
 
@@ -1611,6 +1642,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     playerEpPanelClose.addEventListener('click', () => {
         playerEpPanel.classList.remove('show');
+        playerEpListBtn.setAttribute('aria-expanded', 'false');
     });
 
     function loadPlayerEpisodesPanel() {
@@ -1740,15 +1772,39 @@ document.addEventListener('DOMContentLoaded', () => {
         if (playerTimeCurrent) playerTimeCurrent.textContent = '0:00';
         if (playerTimeDuration) playerTimeDuration.textContent = '0:00';
         if (playerVolume) playerVolume.value = vixPlayer.muted ? 0 : vixPlayer.volume || 1;
+        syncVolumeUI();
+    }
+
+    function syncVolumeUI() {
+        const volume = vixPlayer.muted ? 0 : vixPlayer.volume;
+        if (playerVolume) {
+            playerVolume.value = volume;
+            playerVolume.style.setProperty('--volume', `${volume * 100}%`);
+        }
+        if (playerMute) {
+            const label = volume === 0 ? 'Unmute' : 'Mute';
+            playerMute.setAttribute('aria-label', label);
+            playerMute.title = label;
+        }
+        if (!playerVolumeIcon) return;
+        const speaker = '<path d="M11 5 6 9H3v6h3l5 4V5Z"></path>';
+        if (volume === 0) {
+            playerVolumeIcon.innerHTML = speaker + '<path d="m16 9 5 5m0-5-5 5"></path>';
+        } else if (volume < 0.5) {
+            playerVolumeIcon.innerHTML = speaker + '<path d="M15.5 9.5a4 4 0 0 1 0 5"></path>';
+        } else {
+            playerVolumeIcon.innerHTML = speaker + '<path d="M15.5 8.5a5 5 0 0 1 0 7"></path><path d="M18.5 6a8.5 8.5 0 0 1 0 12"></path>';
+        }
     }
 
     function closePlayerModal() {
         playerRequestId++;
         clearTimeout(controlsHideTimer);
+        clearTimeout(playerCloseTimer);
         playerModal.classList.remove('show');
         playerModal.setAttribute('aria-hidden', 'true');
         syncBodyOverflow();
-        setTimeout(() => {
+		playerCloseTimer = setTimeout(() => {
             playerModal.style.display = 'none';
             playerModal.classList.remove('player-ready');
             stopVixPlayback();
@@ -1756,6 +1812,7 @@ document.addEventListener('DOMContentLoaded', () => {
             playerLoader.innerHTML = '<div class="player-spinner"></div>';
             playerLoader.style.display = 'flex';
             resetPlayerUI();
+			playerCloseTimer = null;
         }, 350);
     }
 
@@ -1813,8 +1870,17 @@ document.addEventListener('DOMContentLoaded', () => {
         if (playerProgress) { const pct = duration ? (vixPlayer.currentTime / duration) * 100 : 0; playerProgress.value = pct; playerProgress.style.setProperty('--progress', `${pct}%`); }
         if (playerTimeCurrent) playerTimeCurrent.textContent = formatPlayerTime(vixPlayer.currentTime);
         if (playerTimeDuration) playerTimeDuration.textContent = formatPlayerTime(duration);
+        if (currentPlayerMovie && vixPlayer.currentTime - lastSavedPlaybackSecond >= 5) {
+            saveProgress(currentPlayerMovie, currentPlayerSeason, currentPlayerEpisode, vixPlayer.currentTime);
+            lastSavedPlaybackSecond = vixPlayer.currentTime;
+        }
     });
     vixPlayer.addEventListener('loadedmetadata', () => {
+        if (pendingResumePosition > 5 && Number.isFinite(vixPlayer.duration) && pendingResumePosition < vixPlayer.duration - 10) {
+            vixPlayer.currentTime = pendingResumePosition;
+            showToast(`Resuming at ${formatPlayerTime(pendingResumePosition)}`);
+        }
+        pendingResumePosition = 0;
         if (playerTimeCurrent) playerTimeCurrent.textContent = '0:00';
         if (playerTimeDuration) playerTimeDuration.textContent = formatPlayerTime(vixPlayer.duration);
         updatePlayerPlayIcon();
@@ -1835,15 +1901,17 @@ document.addEventListener('DOMContentLoaded', () => {
     if (playerMute) playerMute.addEventListener('click', () => {
         if (!isHlsServer(activePlayerServer)) return;
         vixPlayer.muted = !vixPlayer.muted;
-        if (playerVolume) playerVolume.value = vixPlayer.muted ? 0 : vixPlayer.volume;
+        syncVolumeUI();
         showControls();
     });
     if (playerVolume) playerVolume.addEventListener('input', () => {
         if (!isHlsServer(activePlayerServer)) return;
         vixPlayer.volume = Number(playerVolume.value);
         vixPlayer.muted = vixPlayer.volume === 0;
+        syncVolumeUI();
         showControls();
     });
+    vixPlayer.addEventListener('volumechange', syncVolumeUI);
     function togglePlayerFullscreen() {
         const target = playerModal;
         if (!document.fullscreenElement) target.requestFullscreen?.().catch(() => {});
@@ -1867,18 +1935,25 @@ document.addEventListener('DOMContentLoaded', () => {
     document.addEventListener('keydown', e => {
         const playerOpen = playerModal.classList.contains('show');
         if (e.key === 'Escape') {
-            if (playerEpPanel.classList.contains('show')) { playerEpPanel.classList.remove('show'); return; }
+            if (playerEpPanel.classList.contains('show')) { playerEpPanel.classList.remove('show'); playerEpListBtn.setAttribute('aria-expanded', 'false'); return; }
             if (playerOpen) { closePlayerModal(); return; }
             if (detailModal.classList.contains('show')) { closeDetailModal(); return; }
             if (searchOverlay.classList.contains('show')) { closeSearch(); return; }
         }
         if (playerOpen) {
+            const tag = document.activeElement.tagName;
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+            if (e.key === ' ' || e.key === 'k' || e.key === 'K') {
+                e.preventDefault();
+                toggleVixPlay();
+                return;
+            }
+            if (e.key === 'ArrowLeft') { e.preventDefault(); vixPlayer.currentTime = Math.max(0, vixPlayer.currentTime - 10); showControls(); return; }
+            if (e.key === 'ArrowRight' && Number.isFinite(vixPlayer.duration)) { e.preventDefault(); vixPlayer.currentTime = Math.min(vixPlayer.duration, vixPlayer.currentTime + 10); showControls(); return; }
+            if (e.key === 'm' || e.key === 'M') { e.preventDefault(); vixPlayer.muted = !vixPlayer.muted; showControls(); return; }
             if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey) {
-                const tag = document.activeElement.tagName;
-                if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT') {
-                    e.preventDefault();
-                    togglePlayerFullscreen();
-                }
+                e.preventDefault();
+                togglePlayerFullscreen();
             }
             return;
         }

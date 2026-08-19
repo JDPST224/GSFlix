@@ -417,6 +417,11 @@ func updatePopularCache() {
 
 // ── Dynamic media source resolver ───────────────────────────────────────────
 func mediaMovieSourceHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeMediaError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
 	id := strings.TrimPrefix(r.URL.Path, "/api/media/source/movie/")
 	if !validMediaID(id) {
 		writeMediaError(w, http.StatusBadRequest, "Invalid movie ID")
@@ -432,6 +437,11 @@ func mediaMovieSourceHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func mediaTVSourceHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeMediaError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
 	parts := strings.Split(strings.Trim(r.URL.Path[len("/api/media/source/tv/"):], "/"), "/")
 	if len(parts) != 3 || !validMediaID(parts[0]) || !validMediaID(parts[1]) || !validMediaID(parts[2]) {
 		writeMediaError(w, http.StatusBadRequest, "Invalid TV episode parameters")
@@ -449,6 +459,7 @@ func mediaTVSourceHandler(w http.ResponseWriter, r *http.Request) {
 func mediaProviderMovieSourceHandler(provider string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
 			writeMediaError(w, http.StatusMethodNotAllowed, "Method not allowed")
 			return
 		}
@@ -470,6 +481,7 @@ func mediaProviderMovieSourceHandler(provider string) http.HandlerFunc {
 func mediaProviderTVSourceHandler(provider string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
+			w.Header().Set("Allow", http.MethodGet)
 			writeMediaError(w, http.StatusMethodNotAllowed, "Method not allowed")
 			return
 		}
@@ -490,6 +502,11 @@ func mediaProviderTVSourceHandler(provider string) http.HandlerFunc {
 }
 
 func mediaProxyHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodHead)
+		writeMediaError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
 	const prefix = "/api/media/proxy/"
 	if !strings.HasPrefix(r.URL.Path, prefix) {
 		writeMediaError(w, http.StatusNotFound, "Not found")

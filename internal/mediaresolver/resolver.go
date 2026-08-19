@@ -661,8 +661,19 @@ func (r *Resolver) Proxy(w http.ResponseWriter, req *http.Request, token string)
 }
 
 func isBlockedIP(ip net.IP) bool {
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified()
+	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() {
+		return true
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		// CGNAT and the benchmarking range are not publicly routable. They are
+		// intentionally excluded by net.IP.IsPrivate, so block them explicitly
+		// before a provider-controlled manifest can make the proxy fetch them.
+		return ip4[0] == 100 && ip4[1]&0xc0 == 0x40 ||
+			ip4[0] == 198 && (ip4[1] == 18 || ip4[1] == 19) ||
+			ip4[0] == 255 && ip4[1] == 255 && ip4[2] == 255 && ip4[3] == 255
+	}
+	return false
 }
 
 // blockedUpstreamHost reports whether a host must not be fetched upstream.
@@ -692,7 +703,12 @@ func (r *Resolver) blockedUpstreamHost(host string) bool {
 			break
 		}
 	}
-	r.blockCache.Store(host, blocked)
+	// Cache only blocked names. Caching a successful DNS lookup would create a
+	// DNS-rebinding window: a hostname could later resolve to an internal IP
+	// while the proxy continued to trust the stale public result.
+	if blocked {
+		r.blockCache.Store(host, true)
+	}
 	return blocked
 }
 

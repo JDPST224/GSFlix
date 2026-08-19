@@ -11,12 +11,13 @@
     <link rel="stylesheet" href="/css/index.css">
 </head>
 <body>
+    <a class="skip-link" href="#carousels-container">Skip to content</a>
 
     <!-- Navigation -->
     <nav id="navbar">
         <div class="nav-content">
             <h1 class="logo">GSFLIX</h1>
-            <ul class="nav-links">
+            <ul class="nav-links" id="primary-navigation">
                 <li><a href="#" class="active" data-page="home" id="nav-home">Home</a></li>
                 <li><a href="#" data-page="tvshows" id="nav-tvshows">TV Shows</a></li>
                 <li><a href="#" data-page="movies" id="nav-movies">Movies</a></li>
@@ -31,6 +32,9 @@
             <div class="profile">
                 <img src="https://upload.wikimedia.org/wikipedia/commons/0/0b/Netflix-avatar.png" alt="Profile">
             </div>
+            <button class="icon-btn mobile-nav-toggle" id="mobile-nav-toggle" aria-label="Open navigation" aria-controls="primary-navigation" aria-expanded="false">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"></path></svg>
+            </button>
         </div>
     </nav>
 
@@ -211,7 +215,7 @@
                     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 4 15 12 5 20 5 4"></polygon><line x1="19" y1="5" x2="19" y2="19"></line></svg>
                     <span>Next Episode</span>
                 </button>
-                <button class="player-btn-tv" id="player-ep-list-btn" title="Episodes" style="display:none">
+                <button class="player-btn-tv" id="player-ep-list-btn" title="Episodes" aria-expanded="false" aria-controls="player-ep-panel" style="display:none">
                     <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="8" y1="6" x2="21" y2="6"></line><line x1="8" y1="12" x2="21" y2="12"></line><line x1="8" y1="18" x2="21" y2="18"></line><line x1="3" y1="6" x2="3.01" y2="6"></line><line x1="3" y1="12" x2="3.01" y2="12"></line><line x1="3" y1="18" x2="3.01" y2="18"></line></svg>
                     <span>Episodes</span>
                 </button>
@@ -262,16 +266,14 @@
                     </button>
                     <button class="player-icon-btn player-skip-btn" id="player-skip-back" aria-label="Back 10 seconds" title="Back 10 seconds">
                         <svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true">
-                            <path d="M12 5a7 7 0 1 0 6.32 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-                            <path d="M12 5H8.4v3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-                            <text x="12" y="15.4" text-anchor="middle" fill="currentColor" font-size="7.2" font-weight="700">10</text>
+                            <path d="M10 5 3 12l7 7V5Z" fill="currentColor"/>
+                            <text x="17" y="14.6" text-anchor="middle" fill="currentColor" font-size="8.5" font-weight="700">10</text>
                         </svg>
                     </button>
                     <button class="player-icon-btn player-skip-btn" id="player-skip-forward" aria-label="Forward 10 seconds" title="Forward 10 seconds">
                         <svg width="26" height="26" viewBox="0 0 24 24" aria-hidden="true">
-                            <path d="M12 5a7 7 0 1 1-6.32 4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
-                            <path d="M12 5h3.6v3.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
-                            <text x="12" y="15.4" text-anchor="middle" fill="currentColor" font-size="7.2" font-weight="700">10</text>
+                            <text x="7" y="14.6" text-anchor="middle" fill="currentColor" font-size="8.5" font-weight="700">10</text>
+                            <path d="m14 5 7 7-7 7V5Z" fill="currentColor"/>
                         </svg>
                     </button>
                     <div class="player-volume-wrap">
@@ -285,9 +287,9 @@
                 </div>
                 <div class="player-controls-right">
                     <div class="player-track-picker" id="player-audio-picker">
-                        <button type="button" class="player-icon-btn" id="player-audio-trigger" aria-haspopup="listbox" aria-expanded="false" aria-label="Audio" title="Audio">
-                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"></circle><path d="M12 5a7 7 0 0 1 0 14M12 2a10 10 0 0 1 0 20"></path></svg>
-                            <span class="player-sr-only" id="player-audio-current">Original</span>
+                        <button type="button" class="player-icon-btn player-audio-trigger" id="player-audio-trigger" aria-haspopup="listbox" aria-expanded="false" aria-label="Audio" title="Audio">
+                            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 14h3a2 2 0 0 1 2 2v3a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-7a9 9 0 0 1 18 0v7a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3"></path></svg>
+                            <span class="player-track-label" id="player-audio-current">Original</span>
                         </button>
                         <div class="player-track-menu" id="player-audio-menu" role="listbox" aria-label="Audio tracks"></div>
                     </div>
@@ -329,6 +331,7 @@
     <footer>
         <p>GSFlix Demo.</p>
     </footer>
+    <div id="app-toast" class="app-toast" role="status" aria-live="polite" aria-atomic="true"></div>
 
     <script src="https://cdn.jsdelivr.net/npm/hls.js@1.7.0"></script>
     <script src="/js/main.js"></script>
