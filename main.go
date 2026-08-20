@@ -80,7 +80,7 @@ func loadConfig(path string) (mediaresolver.Config, error) {
 		TargetOrigin:            "https://vixsrc.to",
 		VidKingOrigin:           "https://www.vidking.net",
 		BrowserHeadless:         true,
-		BrowserTimeout:          30 * time.Second,
+		BrowserTimeout:          45 * time.Second,
 		SourceResolutionTimeout: 20 * time.Second,
 		MaxBrowserSessions:      3,
 	}
@@ -513,6 +513,7 @@ func mediaProviderTVSourceHandler(provider string) http.HandlerFunc {
 }
 
 func mediaProxyHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		w.Header().Set("Allow", http.MethodGet+", "+http.MethodHead)
 		writeMediaError(w, http.StatusMethodNotAllowed, "Method not allowed")
@@ -524,6 +525,7 @@ func mediaProxyHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	token := strings.Trim(strings.TrimPrefix(r.URL.Path, prefix), "/")
+	token = strings.TrimSuffix(token, ".m3u8")
 	if token == "" {
 		writeMediaError(w, http.StatusBadRequest, "Invalid proxy token")
 		return
@@ -548,6 +550,7 @@ func validMediaID(s string) bool {
 
 func writeMediaJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
 }

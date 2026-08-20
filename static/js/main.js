@@ -1620,9 +1620,7 @@ document.addEventListener('DOMContentLoaded', () => {
             vixPlayer.addEventListener('canplay', tryStartPlayback);
             vixPlayer.addEventListener('playing', tryStartPlayback);
 
-            const isSmartTV = /SmartTV|TV|WebOS|Tizen|BrowseHere|Roku|Vizio|AOSP/i.test(navigator.userAgent);
-
-            if (window.Hls && Hls.isSupported() && !isSmartTV) {
+            if (window.Hls && Hls.isSupported()) {
                 vixHlsInstance = new Hls({
                     enableWorker: true,
                     lowLatencyMode: false,
@@ -1722,8 +1720,10 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            if (typeof isSmartTV !== 'undefined' && isSmartTV || vixPlayer.canPlayType('application/vnd.apple.mpegurl')) {
-                vixPlayer.src = url;
+            if (vixPlayer.canPlayType('application/vnd.apple.mpegurl')) {
+                // Use an absolute URL. Some smart TV native players (like BrowseHere's)
+                // cannot resolve relative URLs and will throw Player Error 3001.
+                vixPlayer.src = new URL(url, window.location.origin).href;
                 return;
             }
 

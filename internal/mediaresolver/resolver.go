@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -62,6 +63,15 @@ const maxManifestBytes = 8 << 20
 
 const defaultSessionTTL = 4 * time.Hour
 
+// copyBufPool reuses 32 KB scratch buffers for proxying segment responses,
+// avoiding repeated allocations and reducing GC pressure under load.
+var copyBufPool = &sync.Pool{
+	New: func() any {
+		b := make([]byte, 32*1024)
+		return &b
+	},
+}
+
 type proxySession struct {
 	source    string
 	headers   http.Header
@@ -74,6 +84,7 @@ type Resolver struct {
 	sem      chan struct{}
 	mu       sync.Mutex
 	closed   bool
+	done     chan struct{} // closed by Close() to wake the sweeper goroutine immediately
 	sessions map[string]*proxySession
 	// transport is shared across proxy requests for connection reuse.
 	transport *http.Transport
@@ -103,45 +114,57 @@ func New(cfg Config) (*Resolver, error) {
 	r := &Resolver{
 		cfg:      cfg,
 		sem:      make(chan struct{}, cfg.MaxBrowserSessions),
+		done:     make(chan struct{}),
 		sessions: make(map[string]*proxySession),
 		transport: &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			MaxIdleConns:          64,
+			Proxy: http.ProxyFromEnvironment,
+			DialContext: (&net.Dialer{
+				Timeout:   5 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+			MaxIdleConns:          128,
+			MaxIdleConnsPerHost:   16,
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+			ForceAttemptHTTP2:     true,
 		},
 	}
 	// Periodically sweep expired proxy sessions so memory doesn't grow
-	// indefinitely under low-traffic conditions where newSession() is rarely
-	// called (the only other eviction point).
+	// indefinitely. The done channel lets Close() wake the goroutine instantly
+	// instead of waiting up to 5 minutes for the next tick.
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
-		for range ticker.C {
-			r.mu.Lock()
-			if r.closed {
-				r.mu.Unlock()
+		for {
+			select {
+			case <-r.done:
 				return
-			}
-			now := time.Now()
-			for tok, s := range r.sessions {
-				if now.After(s.expiresAt) {
-					delete(r.sessions, tok)
+			case <-ticker.C:
+				r.mu.Lock()
+				now := time.Now()
+				for tok, s := range r.sessions {
+					if now.After(s.expiresAt) {
+						delete(r.sessions, tok)
+					}
 				}
+				r.mu.Unlock()
 			}
-			r.mu.Unlock()
 		}
 	}()
 	return r, nil
 }
 
-
 func (r *Resolver) Close() {
 	r.mu.Lock()
-	r.closed = true
-	r.sessions = make(map[string]*proxySession)
+	if !r.closed {
+		r.closed = true
+		r.sessions = make(map[string]*proxySession)
+		close(r.done) // wake the sweeper goroutine immediately
+	}
 	r.mu.Unlock()
+	r.transport.CloseIdleConnections()
 }
 
 func (r *Resolver) isClosed() bool {
@@ -168,6 +191,8 @@ func (r *Resolver) Resolve(parent context.Context, req MediaRequest) (string, er
 	}
 	// A fresh browser run (and proxy session) is created for every Resolve
 	// call; cached browser contexts cannot be reused safely across calls.
+	// The semaphore slot is held across all retry attempts so the total number
+	// of concurrent browser processes never exceeds MaxBrowserSessions.
 	select {
 	case r.sem <- struct{}{}:
 		defer func() { <-r.sem }()
@@ -178,18 +203,29 @@ func (r *Resolver) Resolve(parent context.Context, req MediaRequest) (string, er
 	if err != nil {
 		return "", err
 	}
-	log.Printf("[MediaResolver] Resolving %s", redactQuery(target))
-	ctx, cancel := context.WithTimeout(parent, r.cfg.SourceResolutionTimeout)
-	defer cancel()
-	source, headers, allowed, err := r.resolveInBrowser(ctx, target)
-	if err != nil {
-		return "", err
+	// BrowserTimeout is the single deadline authority. SourceResolutionTimeout
+	// is retained in the config for backward compatibility but is no longer
+	// applied here — wrapping with it would clamp BrowserTimeout and make that
+	// config field useless.
+	const maxAttempts = 2
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if parent.Err() != nil {
+			return "", parent.Err()
+		}
+		log.Printf("[MediaResolver] Resolving %s (attempt %d/%d)", redactQuery(target), attempt, maxAttempts)
+		source, headers, allowed, err := r.resolveInBrowser(parent, target)
+		if err == nil {
+			token, err := r.newSession(source, headers, allowed)
+			if err != nil {
+				return "", err
+			}
+			return "/api/media/proxy/" + token + ".m3u8", nil
+		}
+		lastErr = err
+		log.Printf("[MediaResolver] Attempt %d/%d failed: %v", attempt, maxAttempts, err)
 	}
-	token, err := r.newSession(source, headers, allowed)
-	if err != nil {
-		return "", err
-	}
-	return "/api/media/proxy/" + token, nil
+	return "", lastErr
 }
 
 func (r *Resolver) targetURL(req MediaRequest) (string, error) {
@@ -235,8 +271,27 @@ func (r *Resolver) resolveInBrowser(parent context.Context, target string) (stri
 		browserParent, cancel = context.WithTimeout(parent, r.cfg.BrowserTimeout)
 		defer cancel()
 	}
+
+	// Build a lean set of Chromium flags optimised for headless media scraping:
+	// disable everything that isn't needed for network interception.
 	opts := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
-	opts = append(opts, chromedp.Flag("headless", r.cfg.BrowserHeadless), chromedp.Flag("disable-gpu", true), chromedp.Flag("no-first-run", true), chromedp.Flag("no-default-browser-check", true), chromedp.Flag("disable-quic", true))
+	opts = append(opts,
+		chromedp.Flag("headless", r.cfg.BrowserHeadless),
+		chromedp.Flag("disable-gpu", true),
+		chromedp.Flag("no-first-run", true),
+		chromedp.Flag("no-default-browser-check", true),
+		chromedp.Flag("disable-quic", true),
+		// Reduce startup overhead and memory footprint.
+		chromedp.Flag("disable-extensions", true),
+		chromedp.Flag("disable-background-networking", true),
+		chromedp.Flag("disable-sync", true),
+		chromedp.Flag("disable-translate", true),
+		chromedp.Flag("disable-default-apps", true),
+		chromedp.Flag("mute-audio", true),
+		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.Flag("disable-features", "TranslateUI,BlinkGenPropertyTrees"),
+		chromedp.Flag("disable-popup-blocking", true),
+	)
 	if r.cfg.BrowserExecutable != "" {
 		opts = append(opts, chromedp.ExecPath(r.cfg.BrowserExecutable))
 	}
@@ -244,10 +299,16 @@ func (r *Resolver) resolveInBrowser(parent context.Context, target string) (stri
 	defer cancelAlloc()
 	ctx, cancelBrowser := chromedp.NewContext(alloc)
 	defer cancelBrowser()
+
 	var mu sync.Mutex
 	candidates := make([]hlsCandidate, 0, 8)
 	requestHeaders := make(map[string]http.Header)
 	hostHeaders := make(map[string]http.Header)
+
+	// hlsFound is signalled (non-blocking) the moment the first HLS candidate
+	// is captured, allowing the wait loop below to exit immediately instead of
+	// polling every 200 ms.
+	hlsFound := make(chan struct{}, 1)
 
 	chromedp.ListenTarget(ctx, func(ev any) {
 		e, ok := ev.(*network.EventResponseReceived)
@@ -261,6 +322,11 @@ func (r *Resolver) resolveInBrowser(parent context.Context, target string) (stri
 		candidates = append(candidates, c)
 		mu.Unlock()
 		log.Printf("[MediaResolver] HLS source detected url=%s status=%d mime=%s", redactQuery(c.url), c.status, c.contentType)
+		// Signal immediately — non-blocking so multiple events don't deadlock.
+		select {
+		case hlsFound <- struct{}{}:
+		default:
+		}
 	})
 
 	chromedp.ListenTarget(ctx, func(ev any) {
@@ -284,8 +350,9 @@ func (r *Resolver) resolveInBrowser(parent context.Context, target string) (stri
 		host := strings.ToLower(parsed.Host)
 		mu.Lock()
 		// Cap the per-URL header map: long-lived pages can issue thousands of
-		// requests and most are never matched to an HLS response.
-		if len(requestHeaders) < 2048 {
+		// requests and most are never matched to an HLS response. Reduced from
+		// 2048 to 512 — the window between request and response is short.
+		if len(requestHeaders) < 512 {
 			requestHeaders[e.Request.URL] = cloneHeader(h)
 		}
 		// Media CDNs may put the useful Cookie/Referer context on a later
@@ -297,58 +364,101 @@ func (r *Resolver) resolveInBrowser(parent context.Context, target string) (stri
 		}
 		mu.Unlock()
 	})
+
 	if strings.Contains(strings.ToLower(target), "vidking.net/embed/") {
 		log.Printf("[MediaResolver] VidKing embed used only to discover its HLS manifest; frontend will receive the proxied HLS URL")
 	}
-	log.Printf("[MediaResolver] Navigating to media page")
-	var navErr error
-	for attempt := 1; attempt <= 3; attempt++ {
-		navErr = chromedp.Run(ctx, network.Enable(), chromedp.Navigate(target))
-		if navErr == nil {
-			break
+
+	// Enable network interception synchronously before navigation so no events
+	// are missed. Navigation itself is launched asynchronously so that the HLS
+	// wait loop can start receiving events immediately — we do not need to wait
+	// for the full document load event before checking for captured manifests.
+	if err := chromedp.Run(ctx, network.Enable()); err != nil {
+		return "", nil, nil, fmt.Errorf("network.Enable failed: %w", err)
+	}
+
+	navDone := make(chan error, 1)
+	go func() {
+		log.Printf("[MediaResolver] Navigating to media page (async)")
+		var navErr error
+		for attempt := 1; attempt <= 3; attempt++ {
+			navErr = chromedp.Run(ctx, chromedp.Navigate(target))
+			if navErr == nil {
+				break
+			}
+			msg := navErr.Error()
+			log.Printf("[MediaResolver] Navigation attempt %d/3 failed error=%v", attempt, navErr)
+			// Only retry on transient connection-reset errors; break immediately
+			// for application-level or context-cancelled errors.
+			if !strings.Contains(strings.ToLower(msg), "err_connection_reset") {
+				break
+			}
+			select {
+			case <-parent.Done():
+				navDone <- parent.Err()
+				return
+			case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
+			}
 		}
-		msg := navErr.Error()
-		log.Printf("[MediaResolver] Navigation attempt %d/3 failed error=%v", attempt, navErr)
-		// Some provider/CDN edges occasionally reset the initial document
-		// connection. A second navigation in the same isolated browser context
-		// is safe and lets Chromium establish a fresh connection. Do not retry
-		// arbitrary application errors indefinitely.
-		if !strings.Contains(strings.ToLower(msg), "err_connection_reset") {
-			break
-		}
+		navDone <- navErr
+	}()
+
+	// Click-to-play automation: some embed pages render a poster/overlay that
+	// must be clicked to start the video player. We attempt to click common
+	// play-button selectors 3 s after navigation starts if no HLS URL has been
+	// captured yet. This is best-effort — errors are silently ignored.
+	go func() {
 		select {
+		case <-time.After(3 * time.Second):
+		case <-hlsFound:
+			return // already captured, no click needed
 		case <-parent.Done():
-			return "", nil, nil, parent.Err()
-		case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
+			return
 		}
-	}
-	if navErr != nil {
-		// A document load can report a reset after Chromium has already emitted
-		// the media requests we need. Only treat it as fatal when no usable HLS
-		// candidate was observed. This avoids discarding a valid playback source
-		// because of a late page-load error.
 		mu.Lock()
-		hasCandidate := chooseCandidate(candidates).url != ""
+		alreadyFound := chooseCandidate(candidates).url != ""
 		mu.Unlock()
-		if !hasCandidate {
-			return "", nil, nil, fmt.Errorf("navigation failed: %w", navErr)
+		if alreadyFound {
+			return
 		}
-		log.Printf("[MediaResolver] Navigation reported an error but HLS requests were already captured; continuing error=%v", navErr)
-	}
-	log.Printf("[MediaResolver] Waiting for player")
-	timer := time.NewTimer(2 * time.Second)
+		log.Printf("[MediaResolver] No HLS captured yet; attempting click-to-play")
+		playSelectors := []string{
+			`.vjs-big-play-button`,      // Video.js
+			`.jw-icon-display`,          // JW Player
+			`.plyr__control--overlaid`,  // Plyr
+			`button[aria-label*="play" i]`,
+			`.play-button`, `.btn-play`, `#play-btn`,
+			`[class*="play-btn"]`, `[class*="playBtn"]`,
+			`video`, // clicking the video element directly often starts playback
+		}
+		for _, sel := range playSelectors {
+			mu.Lock()
+			found := chooseCandidate(candidates).url != ""
+			mu.Unlock()
+			if found {
+				return
+			}
+			_ = chromedp.Run(ctx, chromedp.Click(sel, chromedp.ByQuery))
+		}
+	}()
+
+	log.Printf("[MediaResolver] Waiting for HLS source")
+
+	// Adaptive initial wait: exit as soon as an HLS URL is captured OR the
+	// navigation goroutine finishes (which may itself have captured HLS events)
+	// OR 2 seconds elapse, whichever comes first.
+	initialWait := time.NewTimer(2 * time.Second)
 	select {
-	case <-timer.C:
+	case <-hlsFound:
+		initialWait.Stop()
+	case <-initialWait.C:
 	case <-parent.Done():
-		timer.Stop()
+		initialWait.Stop()
 		return "", nil, nil, parent.Err()
 	}
-	ticker := time.NewTicker(200 * time.Millisecond)
-	defer ticker.Stop()
-	// Hard backstop: if the parent context never fires but no HLS candidate is
-	// ever captured, this prevents the polling loop from running indefinitely.
-	deadline := time.NewTimer(r.cfg.SourceResolutionTimeout)
-	defer deadline.Stop()
+
+	// Main wait loop — blocks on hlsFound or navDone signals. The BrowserTimeout
+	// context is the sole deadline; no extra timer is needed here.
 	for {
 		mu.Lock()
 		c := chooseCandidate(candidates)
@@ -370,12 +480,31 @@ func (r *Resolver) resolveInBrowser(parent context.Context, target string) (stri
 			return c.url, merged, allowed, nil
 		}
 		mu.Unlock()
+
 		select {
 		case <-parent.Done():
 			return "", nil, nil, parent.Err()
-		case <-deadline.C:
-			return "", nil, nil, errors.New("timed out waiting for HLS source")
-		case <-ticker.C:
+		case navErr := <-navDone:
+			// Navigation finished (or failed). Check for a candidate captured
+			// during the page load before deciding whether to treat it as fatal.
+			mu.Lock()
+			hasCandidate := chooseCandidate(candidates).url != ""
+			mu.Unlock()
+			if hasCandidate {
+				if navErr != nil {
+					log.Printf("[MediaResolver] Navigation error but HLS already captured; continuing error=%v", navErr)
+				}
+				// Drain navDone so the select doesn't spin; then continue loop.
+				navDone = make(chan error) // replace with a channel that never fires
+				continue
+			}
+			if navErr != nil {
+				return "", nil, nil, fmt.Errorf("navigation failed: %w", navErr)
+			}
+			// Navigation succeeded but no HLS yet — keep waiting.
+			navDone = make(chan error) // replace with a channel that never fires
+		case <-hlsFound:
+			// loop again to pick up the candidate
 		}
 	}
 }
@@ -385,9 +514,25 @@ func isPotentialHLS(raw, mime string) bool {
 	if e != nil || u.Scheme != "https" || u.Host == "" {
 		return false
 	}
-	p := strings.ToLower(u.Path)
 	m := strings.ToLower(strings.TrimSpace(strings.Split(mime, ";")[0]))
-	return strings.HasSuffix(p, ".m3u8") || m == "application/vnd.apple.mpegurl" || m == "application/x-mpegurl" || m == "audio/mpegurl"
+	// Standard HLS MIME types.
+	if m == "application/vnd.apple.mpegurl" || m == "application/x-mpegurl" || m == "audio/mpegurl" {
+		return true
+	}
+	// URL-based detection: match .m3u8 anywhere in the full URL (path or query
+	// string), since some CDNs issue URLs like /playlist?token=xyz&fmt=m3u8.
+	if strings.Contains(strings.ToLower(raw), "m3u8") {
+		return true
+	}
+	// Some providers serve manifests as application/octet-stream or text/plain.
+	// Accept those only when the path contains a well-known playlist keyword so
+	// we don't accidentally treat arbitrary binary downloads as HLS.
+	if m == "application/octet-stream" || m == "text/plain" {
+		p := strings.ToLower(u.Path)
+		return strings.Contains(p, "playlist") || strings.Contains(p, "master") ||
+			strings.Contains(p, "manifest") || strings.Contains(p, "index")
+	}
+	return false
 }
 
 func chooseCandidate(cs []hlsCandidate) hlsCandidate {
@@ -552,6 +697,7 @@ func (r *Resolver) Proxy(w http.ResponseWriter, req *http.Request, token string)
 	sessionHeaders := cloneHeader(s.headers)
 	allowed := cloneAllowed(s.allowed)
 	r.mu.Unlock()
+
 	raw := req.URL.Query().Get("url")
 	if raw == "" {
 		raw = source
@@ -639,10 +785,11 @@ func (r *Resolver) Proxy(w http.ResponseWriter, req *http.Request, token string)
 	if !isManifest {
 		w.WriteHeader(resp.StatusCode)
 		if req.Method != http.MethodHead {
-			// Use a fixed-size copy buffer so large segment responses don't
-			// get buffered into memory by io.Copy's internal allocation.
-			buf := make([]byte, 32*1024)
-			_, _ = io.CopyBuffer(w, resp.Body, buf)
+			// Reuse a pooled copy buffer to avoid per-request allocation for
+			// large segment responses.
+			bufp := copyBufPool.Get().(*[]byte)
+			_, _ = io.CopyBuffer(w, resp.Body, *bufp)
+			copyBufPool.Put(bufp)
 		}
 		return nil
 	}
@@ -672,7 +819,7 @@ func (r *Resolver) Proxy(w http.ResponseWriter, req *http.Request, token string)
 	if !strings.HasPrefix(strings.TrimSpace(text), "#EXTM3U") {
 		log.Printf("[MediaResolver] upstream HLS manifest is not plain HLS text host=%s path=%s content_encoding=%q bytes=%d", strings.ToLower(u.Host), u.Path, resp.Header.Get("Content-Encoding"), len(data))
 	}
-	rewritten, discovered := r.rewriteManifest(text, u, token)
+	rewritten, discovered := r.rewriteManifest(text, u, token, req)
 	if len(discovered) > 0 {
 		r.mu.Lock()
 		if current := r.sessions[token]; current != nil {
@@ -766,8 +913,15 @@ func redactQuery(raw string) string {
 
 var uriAttrRE = regexp.MustCompile(`URI="([^"]+)"`)
 
-func (r *Resolver) rewriteManifest(text string, base *url.URL, token string) (string, map[string]bool) {
+func (r *Resolver) rewriteManifest(text string, base *url.URL, token string, req *http.Request) (string, map[string]bool) {
 	discovered := make(map[string]bool)
+
+	scheme := "http"
+	if req.TLS != nil || req.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	proxyPrefix := scheme + "://" + req.Host + "/api/media/proxy/" + token + ".m3u8?url="
+
 	proxyURL := func(raw string) string {
 		u := resolveMediaURL(base, raw)
 		if u == "" {
@@ -776,8 +930,10 @@ func (r *Resolver) rewriteManifest(text string, base *url.URL, token string) (st
 		if pu, err := url.Parse(u); err == nil {
 			discovered[strings.ToLower(pu.Host)] = true
 		}
-		return "/api/media/proxy/" + token + "?url=" + url.QueryEscape(u)
+		return proxyPrefix + url.QueryEscape(u)
 	}
+
+	text = forceHighestQuality(text)
 
 	// Rewrite URI="..." attributes (EXT-X-MEDIA, EXT-X-KEY, EXT-X-MAP, etc.).
 	text = uriAttrRE.ReplaceAllStringFunc(text, func(m string) string {
@@ -804,6 +960,90 @@ func (r *Resolver) rewriteManifest(text string, base *url.URL, token string) (st
 		}
 	}
 	return strings.Join(lines, "\n"), discovered
+}
+
+// bwRE extracts the BANDWIDTH value from an EXT-X-STREAM-INF line.
+var bwRE = regexp.MustCompile(`BANDWIDTH=(\d+)`)
+
+// resRE extracts the RESOLUTION value (e.g. 1920x1080) from an EXT-X-STREAM-INF line.
+var resRE = regexp.MustCompile(`RESOLUTION=(\d+)x(\d+)`)
+
+// forceHighestQuality rewrites a master HLS playlist so that only the
+// highest-quality video variant is retained. All metadata tags that are
+// independent of the chosen variant — EXT-X-MEDIA (alternate audio/subtitle
+// renditions), EXT-X-SESSION-KEY, EXT-X-SESSION-DATA, EXT-X-I-FRAME-STREAM-INF
+// (trick-play/seek thumbnails) — are preserved so players receive a complete,
+// fully-featured manifest.
+func forceHighestQuality(manifest string) string {
+	if !strings.Contains(manifest, "#EXT-X-STREAM-INF") {
+		return manifest
+	}
+
+	// Pass 1: find the highest-quality variant by bandwidth, with pixel count
+	// (width*height) as a tiebreaker when bandwidths are equal.
+	maxBandwidth := -1
+	maxPixels := -1
+	var bestVariantLines []string
+
+	lines := strings.Split(manifest, "\n")
+	for i := 0; i < len(lines); i++ {
+		line := lines[i]
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "#EXT-X-STREAM-INF") {
+			continue
+		}
+		bw := 0
+		if m := bwRE.FindStringSubmatch(trimmed); len(m) == 2 {
+			bw, _ = strconv.Atoi(m[1])
+		}
+		pixels := 0
+		if m := resRE.FindStringSubmatch(trimmed); len(m) == 3 {
+			w, _ := strconv.Atoi(m[1])
+			h, _ := strconv.Atoi(m[2])
+			pixels = w * h
+		}
+		uriLine := ""
+		if i+1 < len(lines) && !strings.HasPrefix(strings.TrimSpace(lines[i+1]), "#") {
+			uriLine = lines[i+1]
+			i++
+		}
+		// Choose this variant if it has strictly higher bandwidth, or equal
+		// bandwidth with a higher pixel count (resolution tiebreaker).
+		better := bw > maxBandwidth || (bw == maxBandwidth && pixels > maxPixels)
+		if better {
+			maxBandwidth = bw
+			maxPixels = pixels
+			bestVariantLines = []string{line, uriLine}
+		}
+	}
+
+	// Pass 2: rebuild the manifest keeping all non-variant tags intact.
+	// Specifically retain: header tags, EXT-X-MEDIA (audio/subtitles),
+	// EXT-X-SESSION-KEY, EXT-X-SESSION-DATA, EXT-X-I-FRAME-STREAM-INF.
+	var out []string
+	for i := 0; i < len(lines); i++ {
+		trimmed := strings.TrimSpace(lines[i])
+		if strings.HasPrefix(trimmed, "#EXT-X-STREAM-INF") {
+			// Skip the URI line that follows each STREAM-INF tag.
+			if i+1 < len(lines) && !strings.HasPrefix(strings.TrimSpace(lines[i+1]), "#") {
+				i++
+			}
+			continue
+		}
+		// Keep all other lines: header (#EXTM3U, #EXT-X-VERSION, …),
+		// EXT-X-MEDIA, EXT-X-SESSION-KEY, EXT-X-SESSION-DATA,
+		// EXT-X-I-FRAME-STREAM-INF, and blank separator lines.
+		out = append(out, lines[i])
+	}
+
+	// Append the single best variant at the end.
+	if len(bestVariantLines) > 0 {
+		out = append(out, bestVariantLines[0])
+		if bestVariantLines[1] != "" {
+			out = append(out, bestVariantLines[1])
+		}
+	}
+	return strings.Join(out, "\n")
 }
 
 func resolveMediaURL(base *url.URL, raw string) string {
