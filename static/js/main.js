@@ -2,6 +2,7 @@ document.addEventListener('DOMContentLoaded', () => {
     // ─── DOM References ──────────────────────────────────────────────────────
     const navbar              = document.getElementById('navbar');
     const hero                = document.getElementById('hero');
+    const heroBgLayer         = document.getElementById('hero-bg-layer');
     const heroClickArea       = document.getElementById('hero-click-area');
     const heroTitle           = document.getElementById('hero-title');
     const heroDesc            = document.getElementById('hero-desc');
@@ -10,15 +11,26 @@ document.addEventListener('DOMContentLoaded', () => {
     const heroInfo            = document.getElementById('hero-info');
     const heroAddList         = document.getElementById('hero-add-list');
     const heroDots            = document.getElementById('hero-dots');
+    const heroTypeBadge       = document.getElementById('hero-type-badge');
+    const heroMaturityBadge   = document.getElementById('hero-maturity-badge');
+    const heroButtonsEl       = document.querySelector('.hero-buttons');
+    const heroBadgeRowEl      = document.querySelector('.hero-badge-row');
+    const profileWrap         = document.getElementById('profile-wrap');
+    const profileBtn          = document.getElementById('profile-btn');
+    const profileMenuMyList   = document.getElementById('profile-menu-mylist');
+    const profileMenuAccount  = document.getElementById('profile-menu-account');
+    const profileMenuSignout  = document.getElementById('profile-menu-signout');
     const carouselsContainer  = document.getElementById('carousels-container');
     const mylistEmpty         = document.getElementById('mylist-empty');
     const mylistBrowseBtn     = document.getElementById('mylist-browse-btn');
+    const pageLoader          = document.getElementById('page-loader');
 
     // Player
     const playerModal         = document.getElementById('player-modal');
     const closePlayer         = document.getElementById('close-player');
     const vixPlayer           = document.getElementById('vix-player');
     const playerMovieTitle    = document.getElementById('player-movie-title');
+    const playerControlTitle  = document.getElementById('player-control-title');
     const playerMovieSubtitle = document.getElementById('player-movie-subtitle');
     const playerControlsTop   = document.getElementById('player-controls-top');
     const playerLoader        = document.getElementById('player-loader');
@@ -57,8 +69,12 @@ document.addEventListener('DOMContentLoaded', () => {
     const playerMute          = document.getElementById('player-mute');
     const playerVolume        = document.getElementById('player-volume');
     const playerVolumeIcon    = document.getElementById('player-volume-icon');
-    const playerSkipBack      = document.getElementById('player-skip-back');
-    const playerSkipForward   = document.getElementById('player-skip-forward');
+    const playerSeekZoneLeft     = document.getElementById('player-seek-zone-left');
+    const playerSeekZoneRight    = document.getElementById('player-seek-zone-right');
+    const playerSeekIndicatorLeft   = document.getElementById('player-seek-indicator-left');
+    const playerSeekIndicatorRight  = document.getElementById('player-seek-indicator-right');
+    const playerSeekAmountLeft      = document.getElementById('player-seek-amount-left');
+    const playerSeekAmountRight     = document.getElementById('player-seek-amount-right');
     const playerFullscreen    = document.getElementById('player-fullscreen');
 
     // Detail modal
@@ -119,8 +135,8 @@ document.addEventListener('DOMContentLoaded', () => {
     let detailRequestId   = 0;
     let playerRequestId   = 0;
     let currentDetailMovie = null;
-    let currentDetailData  = null;  // full TMDB detail object
-    let currentEpisodes    = [];    // episode list for current season
+    let currentDetailData  = null;
+    let currentEpisodes    = [];
     let trailerVisible     = false;
     let currentPlayerMovie    = null;
     let currentPlayerSeason   = null;
@@ -134,6 +150,16 @@ document.addEventListener('DOMContentLoaded', () => {
     let pendingResumePosition = 0;
     let lastSavedPlaybackSecond = 0;
     let toastTimer = null;
+    let heroCrossfadeTimer = null;
+
+    // ─── Page Loading Screen ─────────────────────────────────────────────────
+    // Hide the loader after animation completes, then reveal content with fade-in
+    if (pageLoader) {
+        setTimeout(() => {
+            pageLoader.classList.add('hidden');
+            document.body.classList.add('content-revealed');
+        }, 1900);
+    }
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
     function escapeHtml(value) {
@@ -204,6 +230,39 @@ document.addEventListener('DOMContentLoaded', () => {
         mobileNavToggle.setAttribute('aria-label', open ? 'Close navigation' : 'Open navigation');
     });
 
+    // ─── Profile dropdown ───────────────────────────────────────────────────
+    function closeProfileMenu() {
+        profileWrap?.classList.remove('open');
+        profileBtn?.setAttribute('aria-expanded', 'false');
+    }
+    profileBtn?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const open = profileWrap.classList.toggle('open');
+        profileBtn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+    profileBtn?.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeProfileMenu();
+    });
+    profileMenuMyList?.addEventListener('click', () => {
+        closeProfileMenu();
+        primaryNavigation?.classList.remove('open');
+        switchPage('mylist');
+    });
+    profileMenuAccount?.addEventListener('click', () => {
+        closeProfileMenu();
+        showToast('Account settings aren\u2019t available in this demo');
+    });
+    profileMenuSignout?.addEventListener('click', () => {
+        closeProfileMenu();
+        showToast('Sign out isn\u2019t available in this demo');
+    });
+    document.addEventListener('click', (e) => {
+        if (profileWrap && !profileWrap.contains(e.target)) closeProfileMenu();
+    });
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') closeProfileMenu();
+    });
+
     function setActiveNav(page) {
         navLinks.forEach(l => l.classList.toggle('active', l.dataset.page === page));
     }
@@ -215,6 +274,9 @@ document.addEventListener('DOMContentLoaded', () => {
         stopHeroRotation();
         mylistEmpty.style.display = 'none';
         carouselsContainer.style.display = '';
+
+        // Smooth scroll to top when switching pages
+        window.scrollTo({ top: 0, behavior: 'smooth' });
 
         if (page === 'mylist') {
             catalogRequestId++;
@@ -290,6 +352,21 @@ document.addEventListener('DOMContentLoaded', () => {
             hero.style.backgroundImage = '';
             heroMetaRow.innerHTML = '';
             heroDots.innerHTML = '';
+            if (heroTypeBadge) heroTypeBadge.textContent = '';
+
+            // This "hero" isn't a real title — it's just filling the banner
+            // space while the list is empty. Hide the badge row and action
+            // buttons, and strip any click handlers left over from the last
+            // real movie shown, so Play/More Info/My List can't fire against
+            // stale data (previously this could open the player on whatever
+            // movie was last featured on the homepage).
+            heroBadgeRowEl?.style.setProperty('display', 'none');
+            heroButtonsEl?.style.setProperty('display', 'none');
+            heroPlay.onclick = null;
+            heroInfo.onclick = null;
+            heroAddList.onclick = null;
+            heroClickArea.onclick = null;
+            heroClickArea.onkeydown = null;
         } else {
             mylistEmpty.style.display = 'none';
             heroMovies = list.filter(m => m.banner).slice(0, 6);
@@ -309,12 +386,53 @@ document.addEventListener('DOMContentLoaded', () => {
         buildHeroDots(movies.length, 0);
     }
 
+    /**
+     * Crossfade the hero background to a new image using the overlay layer.
+     * The layer fades in with the new image, then the main hero bg swaps instantly,
+     * and the layer fades back out — giving a smooth Netflix-style dissolve.
+     */
+    function crossfadeHero(newUrl) {
+        if (!heroBgLayer || !newUrl) {
+            if (newUrl) hero.style.backgroundImage = `url('${CSS.escape(newUrl)}')`;
+            return;
+        }
+
+        // Set new image on the crossfade layer and reveal it
+        heroBgLayer.style.backgroundImage = `url('${CSS.escape(newUrl)}')`;
+        heroBgLayer.classList.add('fading-in');
+
+        // After the fade completes, swap the main hero background silently
+        clearTimeout(heroCrossfadeTimer);
+        heroCrossfadeTimer = setTimeout(() => {
+            hero.style.backgroundImage = `url('${CSS.escape(newUrl)}')`;
+            // Fade the layer back out (it now matches main — invisible seam)
+            heroBgLayer.classList.remove('fading-in');
+        }, 950);
+    }
+
     function setHero(movie) {
+        // Coming back from an empty-state page (e.g. My List with nothing
+        // saved) which hides the action buttons/badge row — make sure a
+        // real movie always restores them.
+        heroButtonsEl?.style.removeProperty('display');
+        heroBadgeRowEl?.style.removeProperty('display');
+
         if (movie.banner) {
-            hero.style.backgroundImage = `url('${movie.banner}')`;
+            crossfadeHero(movie.banner);
         }
         heroTitle.textContent = movie.title;
         heroDesc.textContent  = movie.description || '';
+
+        // Type badge
+        if (heroTypeBadge) {
+            heroTypeBadge.textContent = movie.type === 'tv' ? 'SERIES' : 'FILM';
+        }
+        // Maturity badge (placeholder — backend doesn't send this yet).
+        // Hide the pill entirely instead of leaving an empty bordered box.
+        if (heroMaturityBadge) {
+            heroMaturityBadge.textContent = '';
+            heroMaturityBadge.style.display = 'none';
+        }
 
         // Build meta row
         heroMetaRow.innerHTML = '';
@@ -384,7 +502,7 @@ document.addEventListener('DOMContentLoaded', () => {
             dot.className = 'hero-dot' + (i === active ? ' active' : '');
             dot.setAttribute('aria-label', `Show hero ${i + 1}`);
             dot.addEventListener('click', e => {
-                e.stopPropagation(); // don't fire hero click area
+                e.stopPropagation();
                 heroIndex = i;
                 clearInterval(heroRotateTimer);
                 setHero(heroMovies[heroIndex]);
@@ -421,34 +539,46 @@ document.addEventListener('DOMContentLoaded', () => {
         titleEl.textContent = title;
         rowHeader.appendChild(titleEl);
 
-        const btnGroup = document.createElement('div');
-        btnGroup.className = 'scroll-btns';
-
-        const btnLeft = document.createElement('button');
-        btnLeft.className = 'scroll-btn scroll-left';
-        btnLeft.setAttribute('aria-label', 'Scroll left');
-        btnLeft.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"></polyline></svg>`;
-
-        const btnRight = document.createElement('button');
-        btnRight.className = 'scroll-btn scroll-right';
-        btnRight.setAttribute('aria-label', 'Scroll right');
-        btnRight.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>`;
-
-        btnGroup.appendChild(btnLeft);
-        btnGroup.appendChild(btnRight);
-        rowHeader.appendChild(btnGroup);
         rowDiv.appendChild(rowHeader);
+
+        // Scroll wrap with edge arrows
+        const scrollWrap = document.createElement('div');
+        scrollWrap.className = 'row-scroll-wrap';
+
+        const edgeLeft = document.createElement('button');
+        edgeLeft.className = 'row-edge-arrow row-edge-arrow-left';
+        edgeLeft.setAttribute('aria-label', 'Scroll left');
+        edgeLeft.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="15 18 9 12 15 6"></polyline></svg>`;
+
+        const edgeRight = document.createElement('button');
+        edgeRight.className = 'row-edge-arrow row-edge-arrow-right';
+        edgeRight.setAttribute('aria-label', 'Scroll right');
+        edgeRight.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="9 18 15 12 9 6"></polyline></svg>`;
 
         const postersDiv = document.createElement('div');
         postersDiv.className = 'row-posters';
 
         const scrollAmount = 700;
-        btnLeft.addEventListener('click', () => postersDiv.scrollBy({ left: -scrollAmount, behavior: 'smooth' }));
-        btnRight.addEventListener('click', () => postersDiv.scrollBy({ left: scrollAmount, behavior: 'smooth' }));
+        const doScrollLeft  = () => postersDiv.scrollBy({ left: -scrollAmount, behavior: 'smooth' });
+        const doScrollRight = () => postersDiv.scrollBy({ left:  scrollAmount, behavior: 'smooth' });
+
+        edgeLeft.addEventListener('click', doScrollLeft);
+        edgeRight.addEventListener('click', doScrollRight);
 
         movies.forEach(movie => postersDiv.appendChild(createPosterCard(movie, false, isContinueWatching)));
 
-        rowDiv.appendChild(postersDiv);
+        // ── Keyboard navigation for the poster row ───────────────────────────
+        postersDiv.setAttribute('tabindex', '0');
+        postersDiv.addEventListener('keydown', e => {
+            if (e.key === 'ArrowRight') { e.preventDefault(); postersDiv.scrollBy({ left: 220, behavior: 'smooth' }); }
+            if (e.key === 'ArrowLeft')  { e.preventDefault(); postersDiv.scrollBy({ left: -220, behavior: 'smooth' }); }
+        });
+
+        scrollWrap.appendChild(edgeLeft);
+        scrollWrap.appendChild(postersDiv);
+        scrollWrap.appendChild(edgeRight);
+
+        rowDiv.appendChild(scrollWrap);
         carouselsContainer.appendChild(rowDiv);
     }
 
@@ -487,14 +617,47 @@ document.addEventListener('DOMContentLoaded', () => {
         const overlay = document.createElement('div');
         overlay.className = 'poster-overlay';
 
+        // Quick-action buttons inside the overlay
+        const overlayActions = document.createElement('div');
+        overlayActions.className = 'poster-overlay-actions';
+
+        const quickPlay = document.createElement('button');
+        quickPlay.className = 'poster-quick-play';
+        quickPlay.setAttribute('aria-label', `Play ${movie.title}`);
+        quickPlay.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"></polygon></svg>`;
+        quickPlay.addEventListener('click', e => {
+            e.stopPropagation();
+            openPlayer(movie);
+        });
+
+        const quickList = document.createElement('button');
+        quickList.className = 'poster-quick-list';
+        quickList.setAttribute('aria-label', isInMyList(movie) ? 'Remove from My List' : 'Add to My List');
+        quickList.innerHTML = isInMyList(movie)
+            ? `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`
+            : `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>`;
+        quickList.addEventListener('click', e => {
+            e.stopPropagation();
+            const added = toggleMyList(movie);
+            quickList.innerHTML = added
+                ? `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><polyline points="20 6 9 17 4 12"></polyline></svg>`
+                : `<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>`;
+            showToast(added ? `${movie.title} added to My List` : `${movie.title} removed from My List`);
+        });
+
+        overlayActions.appendChild(quickPlay);
+        overlayActions.appendChild(quickList);
+
         const pTitle = document.createElement('div');
         pTitle.className = 'poster-title';
         pTitle.textContent = movie.title;
 
+        overlay.appendChild(overlayActions);
         overlay.appendChild(pTitle);
         wrapper.appendChild(img);
         wrapper.appendChild(overlay);
 
+        // Continue Watching: progress bar + remove button
         if (isContinueWatching) {
             const removeBtn = document.createElement('button');
             removeBtn.className = 'poster-remove-btn';
@@ -506,6 +669,23 @@ document.addEventListener('DOMContentLoaded', () => {
                 card.remove();
             });
             wrapper.appendChild(removeBtn);
+
+            // Progress bar
+            const prog = getProgress(movie);
+            const progressWrap = document.createElement('div');
+            progressWrap.className = 'poster-progress-wrap';
+            const progressBar = document.createElement('div');
+            progressBar.className = 'poster-progress-bar';
+            // Try to estimate progress from saved position vs. a rough duration estimate
+            // We don't have duration here so we just show a bar if there's a saved position > 0
+            if (prog && prog.position && prog.position > 0) {
+                // Show ~40% as a reasonable indicator that the user has started watching
+                progressBar.style.width = Math.min(95, Math.max(8, (prog.position / 3600) * 30)) + '%';
+            } else {
+                progressBar.style.width = '0%';
+            }
+            progressWrap.appendChild(progressBar);
+            wrapper.appendChild(progressWrap);
         }
 
         const metaBelow = document.createElement('div');
@@ -568,9 +748,19 @@ document.addEventListener('DOMContentLoaded', () => {
     function showError(msg) {
         const err = document.createElement('div');
         err.className = 'error-banner';
-        err.innerHTML = `
-            <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line></svg>
-            <span>${msg}</span>`;
+        // Use textContent for the message to prevent XSS injection.
+        const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        icon.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
+        icon.setAttribute('width', '20'); icon.setAttribute('height', '20');
+        icon.setAttribute('viewBox', '0 0 24 24');
+        icon.setAttribute('fill', 'none'); icon.setAttribute('stroke', 'currentColor');
+        icon.setAttribute('stroke-width', '2'); icon.setAttribute('stroke-linecap', 'round');
+        icon.setAttribute('stroke-linejoin', 'round');
+        icon.innerHTML = '<circle cx="12" cy="12" r="10"></circle><line x1="12" y1="8" x2="12" y2="12"></line><line x1="12" y1="16" x2="12.01" y2="16"></line>';
+        const msgEl = document.createElement('span');
+        msgEl.textContent = msg;
+        err.appendChild(icon);
+        err.appendChild(msgEl);
         carouselsContainer.appendChild(err);
     }
 
@@ -602,6 +792,7 @@ document.addEventListener('DOMContentLoaded', () => {
         detailTagline.textContent = '';
         detailDesc.textContent    = movie.description || 'No description available.';
         detailRating.innerHTML    = '';
+        detailRating.style.display = 'none';
         detailYear.textContent    = '';
         detailRuntime.textContent = '';
         detailGenres.innerHTML    = '';
@@ -672,6 +863,7 @@ document.addEventListener('DOMContentLoaded', () => {
             detailRating.innerHTML = `
                 <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="#f5c518" stroke="none"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"></polygon></svg>
                 ${d.vote_average.toFixed(1)}`;
+            detailRating.style.display = '';
         }
 
         // Year
@@ -712,7 +904,6 @@ document.addEventListener('DOMContentLoaded', () => {
             const official = trailers.find(v => v.official) || trailers[0];
             if (official) trailerKey = official.key;
 
-            // Also try teasers if no trailer
             if (!trailerKey) {
                 const teaser = d.videos.results.find(v => v.site === 'YouTube' && v.type === 'Teaser');
                 if (teaser) trailerKey = teaser.key;
@@ -720,9 +911,12 @@ document.addEventListener('DOMContentLoaded', () => {
         }
 
         if (trailerKey) {
-            const key = trailerKey;
-            detailTrailerBtn.style.display = '';
-            detailTrailerBtn.onclick = () => toggleTrailer(key);
+            // Validate the key is safe before embedding in a URL.
+            const safeKey = /^[A-Za-z0-9_-]{5,20}$/.test(trailerKey) ? trailerKey : null;
+            if (safeKey) {
+                detailTrailerBtn.style.display = '';
+                detailTrailerBtn.onclick = () => toggleTrailer(safeKey);
+            }
         }
 
         // Cast
@@ -760,7 +954,6 @@ document.addEventListener('DOMContentLoaded', () => {
 
         // TV Show Episodes section
         if (movie.type === 'tv' && d.seasons && d.seasons.length) {
-            // Filter out season 0 (Specials) unless it's the only one
             const seasons = d.seasons.filter(s => s.season_number > 0);
             if (seasons.length === 0 && d.seasons.length > 0) {
                 seasons.push(...d.seasons);
@@ -830,7 +1023,6 @@ document.addEventListener('DOMContentLoaded', () => {
             loadEpisodes(movie.id, seasonNum);
         };
 
-        // Load first season
         loadEpisodes(movie.id, seasons[0].season_number);
     }
 
@@ -924,7 +1116,6 @@ document.addEventListener('DOMContentLoaded', () => {
             item.appendChild(stillWrap);
             item.appendChild(info);
 
-            // Play episode on click
             item.addEventListener('click', () => {
                 if (!currentDetailMovie) return;
                 closeDetailModal();
@@ -975,7 +1166,6 @@ document.addEventListener('DOMContentLoaded', () => {
         detailModal.classList.remove('show');
         detailModal.setAttribute('aria-hidden', 'true');
         syncBodyOverflow();
-        // Stop trailer
         detailTrailerIframe.src = '';
         detailTrailerWrap.style.display = 'none';
         detailHero.classList.remove('trailer-active');
@@ -1220,8 +1410,8 @@ document.addEventListener('DOMContentLoaded', () => {
         renderTrackMenu(playerSubtitleMenu, playerSubtitleTracks, subtitleIndex, 'subtitle');
         syncPlayerAudioMenu(audioIndex);
         syncPlayerSubtitleMenu(subtitleIndex);
-        if (playerAudioPicker) playerAudioPicker.style.display = '';
-        if (playerSubtitlePicker) playerSubtitlePicker.style.display = '';
+        if (playerAudioPicker) playerAudioPicker.style.display = playerAudioTracks.length > 1 ? '' : 'none';
+        if (playerSubtitlePicker) playerSubtitlePicker.style.display = playerSubtitleTracks.length > 0 ? '' : 'none';
     }
 
     function selectPlayerTrack(type, index) {
@@ -1247,8 +1437,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (playerSubtitleMenu) playerSubtitleMenu.innerHTML = '';
         if (playerAudioCurrent) playerAudioCurrent.textContent = 'Original';
         if (playerSubtitleCurrent) playerSubtitleCurrent.textContent = 'Off';
-        if (playerAudioPicker) playerAudioPicker.style.display = '';
-        if (playerSubtitlePicker) playerSubtitlePicker.style.display = '';
+        if (playerAudioPicker) playerAudioPicker.style.display = 'none';
+        if (playerSubtitlePicker) playerSubtitlePicker.style.display = 'none';
     }
 
     async function launchPlayer(movie, season, episode) {
@@ -1262,6 +1452,7 @@ document.addEventListener('DOMContentLoaded', () => {
 		pendingResumePosition = savedProgress.season === currentPlayerSeason && savedProgress.episode === currentPlayerEpisode
 			? Number(savedProgress.position) || 0 : 0;
 		lastSavedPlaybackSecond = 0;
+        vixPlayer.__resumeApplied = false; // reset one-shot resume guard for new launch
 
         if (movie.type === 'tv') {
             playerNextEp.style.display = 'flex';
@@ -1280,6 +1471,11 @@ document.addEventListener('DOMContentLoaded', () => {
         activePlayerServer = server;
         playerReady = false;
         playerMovieTitle.textContent = movie.title || '';
+        if (playerControlTitle) {
+            playerControlTitle.textContent = movie.type === 'tv'
+                ? `${movie.title || ''} · S${currentPlayerSeason}:E${currentPlayerEpisode}`
+                : (movie.title || '');
+        }
         if (playerMovieSubtitle) {
             if (movie.type === 'tv') {
                 playerMovieSubtitle.textContent = `Season ${currentPlayerSeason}  ·  Episode ${currentPlayerEpisode}`;
@@ -1305,12 +1501,9 @@ document.addEventListener('DOMContentLoaded', () => {
         resetPlayerTracks();
         resetPlayerUI();
         vixPlayer.playbackRate = 1;
-        vixPlayer.__dbgTimeLogged = false;
         vixPlayer.style.display = 'block';
 
         try {
-            // Providers are resolved to a proxied HLS manifest. The VidKing embed page is never
-            // rendered in GSFlix; it is used only by the backend to discover the HLS source.
             const provider = server === 'vidking' ? 'vidking' : 'vixsrc';
             const endpoint = movie.type === 'tv'
                 ? `/api/media/source/${provider}/tv/${encodeURIComponent(movie.id)}/${encodeURIComponent(currentPlayerSeason)}/${encodeURIComponent(currentPlayerEpisode)}`
@@ -1349,7 +1542,9 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         vixPlayer.pause();
         vixPlayer.removeAttribute('src');
-        vixPlayer.load();
+        // Do NOT call vixPlayer.load() here — removing the src attribute is
+        // sufficient to reset the media element, and calling load() on an
+        // empty source triggers a spurious browser media error.
         vixPlayer.onloadedmetadata = null;
         vixPlayer.onerror = null;
     }
@@ -1432,6 +1627,9 @@ document.addEventListener('DOMContentLoaded', () => {
                     capLevelToPlayerSize: false,
                     renderTextTracksNatively: true,
                     autoStartLoad: true,
+                    // Start loading at the highest available level immediately.
+                    // HLS.js clamps this to the actual highest index, so 999 is safe.
+                    startLevel: 999,
                     xhrSetup: function(xhr) {
                         xhr.withCredentials = false;
                     }
@@ -1439,19 +1637,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 vixHlsInstance.on(Hls.Events.MANIFEST_PARSED, function(event, data) {
                     if (requestId !== playerRequestId) return;
-                    
+                    // Lock playback to the highest available bitrate level and
+                    // disable ABR so the player never steps down mid-stream.
+                    // capLevelToPlayerSize is already false so resolution is
+                    // not limited by the visible player dimensions.
                     if (data.levels && data.levels.length > 0) {
                         let highestLevelIndex = 0;
                         let maxBitrate = 0;
                         for (let i = 0; i < data.levels.length; i++) {
-                            if (data.levels[i].bitrate > maxBitrate) {
+                            if ((data.levels[i].bitrate || 0) > maxBitrate) {
                                 maxBitrate = data.levels[i].bitrate;
                                 highestLevelIndex = i;
                             }
                         }
+                        // Set all three level pointers so HLS.js has no path back to ABR.
                         vixHlsInstance.currentLevel = highestLevelIndex;
+                        vixHlsInstance.loadLevel   = highestLevelIndex;
+                        vixHlsInstance.nextLevel   = highestLevelIndex;
+                        vixHlsInstance.autoLevelEnabled = false;
                     }
-
                     applyPlayerTracks(provider);
                     if (provider !== 'vidking') {
                         vixHlsInstance.subtitleTrack = -1;
@@ -1501,6 +1705,14 @@ document.addEventListener('DOMContentLoaded', () => {
                         detail += ` (${data.response.code})`;
                     }
                     settleErr(new Error(detail));
+                });
+
+                // Reset recovery flag after successful playback resumes so a
+                // second fatal error later in the stream can also be recovered.
+                vixHlsInstance.on(Hls.Events.FRAG_LOADED, function() {
+                    if (vixHlsInstance && vixHlsInstance.__gsflixRecovered && !vixPlayer.paused) {
+                        vixHlsInstance.__gsflixRecovered = false;
+                    }
                 });
 
                 vixHlsInstance.loadSource(url);
@@ -1773,6 +1985,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (playerTimeDuration) playerTimeDuration.textContent = '0:00';
         if (playerVolume) playerVolume.value = vixPlayer.muted ? 0 : vixPlayer.volume || 1;
         syncVolumeUI();
+        playerSeekIndicatorLeft?.classList.remove('show', 'pulse');
+        playerSeekIndicatorRight?.classList.remove('show', 'pulse');
     }
 
     function syncVolumeUI() {
@@ -1812,7 +2026,7 @@ document.addEventListener('DOMContentLoaded', () => {
             playerLoader.innerHTML = '<div class="player-spinner"></div>';
             playerLoader.style.display = 'flex';
             resetPlayerUI();
-			playerCloseTimer = null;
+		playerCloseTimer = null;
         }, 350);
     }
 
@@ -1848,6 +2062,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
     function isHlsServer(server) {
+        // Both available servers (vixsrc and vidking) use HLS. This helper is
+        // kept for clarity and forward-compatibility if other server types are added.
         return server === 'vixsrc' || server === 'vidking';
     }
 
@@ -1860,12 +2076,10 @@ document.addEventListener('DOMContentLoaded', () => {
     if (playerPlay) playerPlay.addEventListener('click', toggleVixPlay);
     if (playerCenterPlay) playerCenterPlay.addEventListener('click', toggleVixPlay);
     vixPlayer.addEventListener('click', () => { if (isHlsServer(activePlayerServer) && playerReady) toggleVixPlay(); });
+    vixPlayer.addEventListener('dblclick', () => { if (isHlsServer(activePlayerServer) && playerReady) togglePlayerFullscreen(); });
     vixPlayer.addEventListener('play', updatePlayerPlayIcon);
     vixPlayer.addEventListener('pause', updatePlayerPlayIcon);
     vixPlayer.addEventListener('timeupdate', () => {
-        if (!vixPlayer.__dbgTimeLogged && vixPlayer.currentTime > 1) {
-            vixPlayer.__dbgTimeLogged = true;
-        }
         const duration = Number.isFinite(vixPlayer.duration) ? vixPlayer.duration : 0;
         if (playerProgress) { const pct = duration ? (vixPlayer.currentTime / duration) * 100 : 0; playerProgress.value = pct; playerProgress.style.setProperty('--progress', `${pct}%`); }
         if (playerTimeCurrent) playerTimeCurrent.textContent = formatPlayerTime(vixPlayer.currentTime);
@@ -1876,7 +2090,8 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     });
     vixPlayer.addEventListener('loadedmetadata', () => {
-        if (pendingResumePosition > 5 && Number.isFinite(vixPlayer.duration) && pendingResumePosition < vixPlayer.duration - 10) {
+        if (!vixPlayer.__resumeApplied && pendingResumePosition > 5 && Number.isFinite(vixPlayer.duration) && pendingResumePosition < vixPlayer.duration - 10) {
+            vixPlayer.__resumeApplied = true;
             vixPlayer.currentTime = pendingResumePosition;
             showToast(`Resuming at ${formatPlayerTime(pendingResumePosition)}`);
         }
@@ -1896,14 +2111,66 @@ document.addEventListener('DOMContentLoaded', () => {
         vixPlayer.currentTime = (Number(playerProgress.value) / 100) * vixPlayer.duration;
         showControls();
     });
-    if (playerSkipBack) playerSkipBack.addEventListener('click', () => { if (isHlsServer(activePlayerServer)) vixPlayer.currentTime = Math.max(0, vixPlayer.currentTime - 10); showControls(); });
-    if (playerSkipForward) playerSkipForward.addEventListener('click', () => { if (isHlsServer(activePlayerServer) && Number.isFinite(vixPlayer.duration)) vixPlayer.currentTime = Math.min(vixPlayer.duration, vixPlayer.currentTime + 10); showControls(); });
     if (playerMute) playerMute.addEventListener('click', () => {
         if (!isHlsServer(activePlayerServer)) return;
         vixPlayer.muted = !vixPlayer.muted;
         syncVolumeUI();
         showControls();
     });
+
+    // ─── Double-tap-to-seek zones (Netflix/YouTube-style) ─────────────────
+    // Tapping once on the left/right edge of the video behaves just like
+    // tapping the video itself (toggle play/pause). Tapping twice quickly in
+    // the same zone instead seeks ±10s and shows a brief ripple indicator.
+    // Consecutive double-taps within the zone accumulate ("20 seconds",
+    // "30 seconds"...) before resetting, matching the real apps.
+    function setupSeekZone(zoneEl, indicatorEl, amountEl, direction) {
+        if (!zoneEl) return;
+        const SINGLE_TAP_DELAY = 260;
+        const ACCUM_RESET_DELAY = 700;
+        let tapCount = 0;
+        let singleTapTimer = null;
+        let accumSeconds = 0;
+        let accumResetTimer = null;
+
+        function doSeek() {
+            if (!isHlsServer(activePlayerServer) || !playerReady) return;
+            if (direction === 'back') {
+                vixPlayer.currentTime = Math.max(0, vixPlayer.currentTime - 10);
+            } else if (Number.isFinite(vixPlayer.duration)) {
+                vixPlayer.currentTime = Math.min(vixPlayer.duration, vixPlayer.currentTime + 10);
+            }
+            accumSeconds += 10;
+            amountEl.textContent = `${accumSeconds} second${accumSeconds === 1 ? '' : 's'}`;
+            indicatorEl.classList.remove('pulse');
+            void indicatorEl.offsetWidth; // restart the pulse animation
+            indicatorEl.classList.add('show', 'pulse');
+            clearTimeout(accumResetTimer);
+            accumResetTimer = setTimeout(() => {
+                indicatorEl.classList.remove('show');
+                accumSeconds = 0;
+            }, ACCUM_RESET_DELAY);
+            showControls();
+        }
+
+        zoneEl.addEventListener('click', () => {
+            if (!isHlsServer(activePlayerServer) || !playerReady) return;
+            tapCount++;
+            if (tapCount === 1) {
+                singleTapTimer = setTimeout(() => {
+                    tapCount = 0;
+                    toggleVixPlay();
+                }, SINGLE_TAP_DELAY);
+            } else {
+                clearTimeout(singleTapTimer);
+                tapCount = 0;
+                doSeek();
+            }
+        });
+    }
+    setupSeekZone(playerSeekZoneLeft, playerSeekIndicatorLeft, playerSeekAmountLeft, 'back');
+    setupSeekZone(playerSeekZoneRight, playerSeekIndicatorRight, playerSeekAmountRight, 'forward');
+
     if (playerVolume) playerVolume.addEventListener('input', () => {
         if (!isHlsServer(activePlayerServer)) return;
         vixPlayer.volume = Number(playerVolume.value);
@@ -1912,10 +2179,104 @@ document.addEventListener('DOMContentLoaded', () => {
         showControls();
     });
     vixPlayer.addEventListener('volumechange', syncVolumeUI);
+    function syncFullscreenIcon() {
+        if (!playerFullscreen) return;
+        const isFullscreen = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement;
+        if (isFullscreen) {
+            playerFullscreen.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><polyline points="8 3 8 8 3 8"></polyline><polyline points="16 3 16 8 21 8"></polyline><polyline points="8 21 8 16 3 16"></polyline><polyline points="16 21 16 16 21 16"></polyline></svg>';
+        } else {
+            playerFullscreen.innerHTML = '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><polyline points="8 3 3 3 3 8"></polyline><polyline points="16 3 21 3 21 8"></polyline><polyline points="8 21 3 21 3 16"></polyline><polyline points="21 16 21 21 16 21"></polyline></svg>';
+        }
+    }
+    document.addEventListener('fullscreenchange', syncFullscreenIcon);
+    document.addEventListener('webkitfullscreenchange', syncFullscreenIcon);
+    document.addEventListener('mozfullscreenchange', syncFullscreenIcon);
+    document.addEventListener('MSFullscreenChange', syncFullscreenIcon);
+
+    // Attempts to request fullscreen on `el` using whichever vendor-prefixed
+    // API is available. Returns the resulting Promise (if any) or null if the
+    // element has no fullscreen API at all.
+    function requestFullscreenOn(el) {
+        if (!el) return null;
+        if (el.requestFullscreen) return el.requestFullscreen();
+        if (el.webkitRequestFullscreen) { el.webkitRequestFullscreen(); return null; }
+        if (el.mozRequestFullScreen) { el.mozRequestFullScreen(); return null; }
+        if (el.msRequestFullscreen) { el.msRequestFullscreen(); return null; }
+        return undefined; // signals "no API available on this element"
+    }
+
     function togglePlayerFullscreen() {
         const target = playerModal;
-        if (!document.fullscreenElement) target.requestFullscreen?.().catch(() => {});
-        else document.exitFullscreen?.().catch(() => {});
+        const isFullscreen = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement;
+
+        try {
+            if (!isFullscreen) {
+                // Some browsers (older mobile Safari, some in-app/webview
+                // browsers, or pages embedded in an iframe without
+                // `allow="fullscreen"`) report `fullscreenEnabled === false`.
+                // In that case requesting fullscreen on any element will
+                // always fail, so go straight to the one thing that *can*
+                // still work on iOS: native fullscreen on the <video> itself.
+                if (document.fullscreenEnabled === false && !document.webkitFullscreenEnabled) {
+                    if (vixPlayer.webkitEnterFullscreen) {
+                        vixPlayer.webkitEnterFullscreen();
+                    } else {
+                        showToast('Fullscreen is disabled in this browser/frame');
+                    }
+                    showControls();
+                    return;
+                }
+
+                const result = requestFullscreenOn(target);
+                if (result && result.catch) {
+                    // Container fullscreen was rejected (permissions policy,
+                    // user gesture lost, etc). Fall back to requesting
+                    // fullscreen on the <video> element directly, which is
+                    // more broadly supported.
+                    result.catch(err => {
+                        console.warn('Fullscreen failed on player container, trying video element:', err);
+                        const videoResult = requestFullscreenOn(vixPlayer);
+                        if (videoResult && videoResult.catch) {
+                            videoResult.catch(err2 => {
+                                console.warn('Fullscreen failed on video element too:', err2);
+                                if (vixPlayer.webkitEnterFullscreen) {
+                                    vixPlayer.webkitEnterFullscreen();
+                                } else {
+                                    showToast('Fullscreen blocked by browser (permissions)');
+                                }
+                            });
+                        } else if (videoResult === undefined && vixPlayer.webkitEnterFullscreen) {
+                            vixPlayer.webkitEnterFullscreen();
+                        }
+                    });
+                } else if (result === undefined) {
+                    // Container had no fullscreen API at all — try the video
+                    // element before giving up.
+                    const videoResult = requestFullscreenOn(vixPlayer);
+                    if (videoResult === undefined) {
+                        if (vixPlayer.webkitEnterFullscreen) {
+                            vixPlayer.webkitEnterFullscreen();
+                        } else {
+                            showToast('Fullscreen not supported on this device');
+                        }
+                    }
+                }
+            } else {
+                if (document.exitFullscreen) {
+                    const p = document.exitFullscreen();
+                    if (p && p.catch) p.catch(() => {});
+                } else if (document.webkitExitFullscreen) {
+                    document.webkitExitFullscreen();
+                } else if (document.mozCancelFullScreen) {
+                    document.mozCancelFullScreen();
+                } else if (document.msExitFullscreen) {
+                    document.msExitFullscreen();
+                }
+            }
+        } catch (err) {
+            console.warn('Fullscreen error:', err);
+            showToast('Fullscreen error: ' + err.message);
+        }
         showControls();
     }
 

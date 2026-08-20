@@ -100,7 +100,7 @@ func New(cfg Config) (*Resolver, error) {
 			return nil, fmt.Errorf("%s must be a bare HTTPS origin (no path, query, or fragment)", k)
 		}
 	}
-	return &Resolver{
+	r := &Resolver{
 		cfg:      cfg,
 		sem:      make(chan struct{}, cfg.MaxBrowserSessions),
 		sessions: make(map[string]*proxySession),
@@ -111,8 +111,31 @@ func New(cfg Config) (*Resolver, error) {
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
 		},
-	}, nil
+	}
+	// Periodically sweep expired proxy sessions so memory doesn't grow
+	// indefinitely under low-traffic conditions where newSession() is rarely
+	// called (the only other eviction point).
+	go func() {
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			r.mu.Lock()
+			if r.closed {
+				r.mu.Unlock()
+				return
+			}
+			now := time.Now()
+			for tok, s := range r.sessions {
+				if now.After(s.expiresAt) {
+					delete(r.sessions, tok)
+				}
+			}
+			r.mu.Unlock()
+		}
+	}()
+	return r, nil
 }
+
 
 func (r *Resolver) Close() {
 	r.mu.Lock()
@@ -322,6 +345,10 @@ func (r *Resolver) resolveInBrowser(parent context.Context, target string) (stri
 	}
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
+	// Hard backstop: if the parent context never fires but no HLS candidate is
+	// ever captured, this prevents the polling loop from running indefinitely.
+	deadline := time.NewTimer(r.cfg.SourceResolutionTimeout)
+	defer deadline.Stop()
 	for {
 		mu.Lock()
 		c := chooseCandidate(candidates)
@@ -346,6 +373,8 @@ func (r *Resolver) resolveInBrowser(parent context.Context, target string) (stri
 		select {
 		case <-parent.Done():
 			return "", nil, nil, parent.Err()
+		case <-deadline.C:
+			return "", nil, nil, errors.New("timed out waiting for HLS source")
 		case <-ticker.C:
 		}
 	}
@@ -535,7 +564,7 @@ func (r *Resolver) Proxy(w http.ResponseWriter, req *http.Request, token string)
 	if !allowed[host] {
 		return errors.New("upstream host not allowed")
 	}
-	if r.blockedUpstreamHost(u.Hostname()) {
+	if r.blockedUpstreamHost(req.Context(), u.Hostname()) {
 		return errors.New("upstream host blocked")
 	}
 	client := &http.Client{
@@ -543,7 +572,7 @@ func (r *Resolver) Proxy(w http.ResponseWriter, req *http.Request, token string)
 		Timeout:   60 * time.Second,
 		CheckRedirect: func(next *http.Request, via []*http.Request) error {
 			nu := next.URL
-			if nu == nil || nu.Scheme != "https" || nu.Host == "" || r.blockedUpstreamHost(nu.Hostname()) {
+			if nu == nil || nu.Scheme != "https" || nu.Host == "" || r.blockedUpstreamHost(next.Context(), nu.Hostname()) {
 				return http.ErrUseLastResponse
 			}
 			nhost := strings.ToLower(nu.Host)
@@ -610,7 +639,10 @@ func (r *Resolver) Proxy(w http.ResponseWriter, req *http.Request, token string)
 	if !isManifest {
 		w.WriteHeader(resp.StatusCode)
 		if req.Method != http.MethodHead {
-			_, _ = io.Copy(w, resp.Body)
+			// Use a fixed-size copy buffer so large segment responses don't
+			// get buffered into memory by io.Copy's internal allocation.
+			buf := make([]byte, 32*1024)
+			_, _ = io.CopyBuffer(w, resp.Body, buf)
 		}
 		return nil
 	}
@@ -680,7 +712,7 @@ func isBlockedIP(ip net.IP) bool {
 // Besides literal IP checks it resolves hostnames so that DNS names pointing
 // at loopback/private addresses (e.g. 127.0.0.1.nip.io) cannot bypass the
 // SSRF guard. Failures fail closed but are not cached.
-func (r *Resolver) blockedUpstreamHost(host string) bool {
+func (r *Resolver) blockedUpstreamHost(ctx context.Context, host string) bool {
 	host = strings.TrimSpace(strings.ToLower(host))
 	host = strings.Trim(host, "[]")
 	if host == "" || host == "localhost" {
@@ -692,7 +724,7 @@ func (r *Resolver) blockedUpstreamHost(host string) bool {
 	if v, ok := r.blockCache.Load(host); ok {
 		return v.(bool)
 	}
-	ips, err := net.DefaultResolver.LookupIP(context.Background(), "ip", host)
+	ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
 	if err != nil || len(ips) == 0 {
 		return true // fail closed
 	}

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,15 +10,21 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"movie/internal/mediaresolver"
 )
 
 var mediaSourceResolver *mediaresolver.Resolver
+
+// tmdbHTTPClient is a shared client used for all TMDB API calls so that
+// Go's built-in connection pool is reused across requests.
+var tmdbHTTPClient = &http.Client{Timeout: 15 * time.Second}
 
 type Movie struct {
 	ID          string   `json:"id"`
@@ -121,7 +128,9 @@ func loadConfig(path string) (mediaresolver.Config, error) {
 		case "BROWSER_EXECUTABLE":
 			cfg.BrowserExecutable = val
 		case "TARGET_ORIGIN":
-			cfg.TargetOrigin = val
+			// Deprecated alias for VIXSRC_ORIGIN — kept for backward compatibility.
+			log.Println("Warning: TARGET_ORIGIN is deprecated; use VIXSRC_ORIGIN instead")
+			cfg.TargetOrigin = cleanConfigValue(val)
 		case "VIXSRC_ORIGIN":
 			cfg.TargetOrigin = cleanConfigValue(val)
 		case "VIDKING_ORIGIN":
@@ -157,7 +166,9 @@ func loadConfig(path string) (mediaresolver.Config, error) {
 	if v := os.Getenv("BROWSER_EXECUTABLE"); v != "" {
 		cfg.BrowserExecutable = v
 	}
+	// TARGET_ORIGIN is the deprecated name for VIXSRC_ORIGIN.
 	if v := os.Getenv("TARGET_ORIGIN"); v != "" {
+		log.Println("Warning: TARGET_ORIGIN env var is deprecated; use VIXSRC_ORIGIN instead")
 		cfg.TargetOrigin = v
 	}
 	if v := os.Getenv("VIXSRC_ORIGIN"); v != "" {
@@ -209,8 +220,8 @@ func fetchTMDB(endpoint string, categories []string, mediaType string) []Movie {
 		return nil
 	}
 
-	url := buildURL(endpoint)
-	req, err := http.NewRequest("GET", url, nil)
+	rawURL := buildURL(endpoint)
+	req, err := http.NewRequest("GET", rawURL, nil)
 	if err != nil {
 		log.Println("Error creating request:", err)
 		return nil
@@ -221,15 +232,15 @@ func fetchTMDB(endpoint string, categories []string, mediaType string) []Movie {
 		req.Header.Add("Authorization", "Bearer "+tmdbToken)
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	res, err := client.Do(req)
+	res, err := tmdbHTTPClient.Do(req)
 	if err != nil {
 		log.Println("Error fetching TMDB data:", err)
 		return nil
 	}
 	defer res.Body.Close()
 
-	body, err := io.ReadAll(res.Body)
+	// Cap response size to prevent OOM from unexpected large responses.
+	body, err := io.ReadAll(io.LimitReader(res.Body, 10<<20))
 	if err != nil {
 		log.Println("Error reading response body:", err)
 		return nil
@@ -735,14 +746,13 @@ func fetchMultiSearch(encodedQuery string) []Movie {
 		req.Header.Add("Authorization", "Bearer "+tmdbToken)
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	res, err := client.Do(req)
+	res, err := tmdbHTTPClient.Do(req)
 	if err != nil {
 		return nil
 	}
 	defer res.Body.Close()
 
-	body, err := io.ReadAll(res.Body)
+	body, err := io.ReadAll(io.LimitReader(res.Body, 10<<20))
 	if err != nil {
 		return nil
 	}
@@ -842,7 +852,9 @@ func detailHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	append := func(base, extra string) string {
+	// addParam appends a query parameter to a URL, using "?" or "&" as appropriate.
+	// Named addParam to avoid shadowing the built-in append.
+	addParam := func(base, extra string) string {
 		if strings.Contains(base, "?") {
 			return base + "&" + extra
 		}
@@ -857,8 +869,8 @@ func detailHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rawURL := buildURL(endpoint)
-	rawURL = append(rawURL, "append_to_response=credits,videos,recommendations")
-	rawURL = append(rawURL, "language=en-US")
+	rawURL = addParam(rawURL, "append_to_response=credits,videos,recommendations")
+	rawURL = addParam(rawURL, "language=en-US")
 
 	req, err := http.NewRequest("GET", rawURL, nil)
 	if err != nil {
@@ -871,19 +883,20 @@ func detailHandler(w http.ResponseWriter, r *http.Request) {
 		req.Header.Add("Authorization", "Bearer "+tmdbToken)
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	res, err := client.Do(req)
-	if err != nil || res.StatusCode != http.StatusOK {
+	res, err := tmdbHTTPClient.Do(req)
+	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		w.Write([]byte(`{}`))
-		if res != nil {
-			res.Body.Close()
-		}
 		return
 	}
 	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte(`{}`))
+		return
+	}
 
-	body, err := io.ReadAll(res.Body)
+	body, err := io.ReadAll(io.LimitReader(res.Body, 10<<20))
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{}`))
@@ -928,19 +941,20 @@ func episodesHandler(w http.ResponseWriter, r *http.Request) {
 		req.Header.Add("Authorization", "Bearer "+tmdbToken)
 	}
 
-	client := &http.Client{Timeout: 15 * time.Second}
-	res, err := client.Do(req)
-	if err != nil || res.StatusCode != http.StatusOK {
+	res, err := tmdbHTTPClient.Do(req)
+	if err != nil {
 		w.WriteHeader(http.StatusBadGateway)
 		w.Write([]byte(`{}`))
-		if res != nil {
-			res.Body.Close()
-		}
 		return
 	}
 	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		w.WriteHeader(http.StatusBadGateway)
+		w.Write([]byte(`{}`))
+		return
+	}
 
-	body, err := io.ReadAll(res.Body)
+	body, err := io.ReadAll(io.LimitReader(res.Body, 10<<20))
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{}`))
@@ -961,7 +975,6 @@ func main() {
 	if resolverErr != nil {
 		log.Fatal("Failed to initialize media source resolver: ", resolverErr)
 	}
-	defer mediaSourceResolver.Close()
 
 	if tmdbToken == "" && tmdbAPIKey == "" {
 		log.Println("WARNING: No TMDB credentials in config.conf")
@@ -1016,11 +1029,29 @@ func main() {
 		Addr:              ":8080",
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       60 * time.Second,
+		WriteTimeout:      120 * time.Second, // covers streaming proxy responses
 		IdleTimeout:       90 * time.Second,
 	}
 
-	log.Println("Server listening on :8080 — open http://localhost:8080")
-	if err := server.ListenAndServe(); err != nil {
-		log.Fatal("Error starting server: ", err)
+	// Graceful shutdown: wait for SIGTERM or SIGINT, then cleanly drain active
+	// connections and release browser sessions before exiting.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
+	go func() {
+		log.Println("Server listening on :8080 — open http://localhost:8080")
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatal("Error starting server: ", err)
+		}
+	}()
+
+	<-ctx.Done()
+	log.Println("Shutdown signal received — draining connections...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		log.Printf("Server shutdown error: %v", err)
 	}
+	mediaSourceResolver.Close()
+	log.Println("Server stopped cleanly.")
 }
