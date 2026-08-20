@@ -516,7 +516,7 @@ func isPotentialHLS(raw, mime string) bool {
 	}
 	m := strings.ToLower(strings.TrimSpace(strings.Split(mime, ";")[0]))
 	// Standard HLS MIME types.
-	if m == "application/vnd.apple.mpegurl" || m == "application/x-mpegurl" || m == "audio/mpegurl" {
+	if strings.Contains(m, "mpegurl") {
 		return true
 	}
 	// URL-based detection: match .m3u8 anywhere in the full URL (path or query
@@ -1002,14 +1002,22 @@ func forceHighestQuality(manifest string) string {
 			h, _ := strconv.Atoi(m[2])
 			pixels = w * h
 		}
+		
 		uriLine := ""
-		if i+1 < len(lines) && !strings.HasPrefix(strings.TrimSpace(lines[i+1]), "#") {
-			uriLine = lines[i+1]
-			i++
+		for j := i + 1; j < len(lines); j++ {
+			t := strings.TrimSpace(lines[j])
+			if t == "" {
+				continue
+			}
+			if !strings.HasPrefix(t, "#") {
+				uriLine = lines[j]
+				i = j
+			}
+			break
 		}
-		// Choose this variant if it has strictly higher bandwidth, or equal
-		// bandwidth with a higher pixel count (resolution tiebreaker).
-		better := bw > maxBandwidth || (bw == maxBandwidth && pixels > maxPixels)
+		// Choose this variant if it has strictly higher pixel count (resolution),
+		// or equal pixel count with a higher bandwidth (bandwidth tiebreaker).
+		better := pixels > maxPixels || (pixels == maxPixels && bw > maxBandwidth)
 		if better {
 			maxBandwidth = bw
 			maxPixels = pixels
@@ -1024,9 +1032,16 @@ func forceHighestQuality(manifest string) string {
 	for i := 0; i < len(lines); i++ {
 		trimmed := strings.TrimSpace(lines[i])
 		if strings.HasPrefix(trimmed, "#EXT-X-STREAM-INF") {
-			// Skip the URI line that follows each STREAM-INF tag.
-			if i+1 < len(lines) && !strings.HasPrefix(strings.TrimSpace(lines[i+1]), "#") {
-				i++
+			// Skip the URI line that follows each STREAM-INF tag, ignoring any blank lines.
+			for j := i + 1; j < len(lines); j++ {
+				t := strings.TrimSpace(lines[j])
+				if t == "" {
+					continue
+				}
+				if !strings.HasPrefix(t, "#") {
+					i = j
+				}
+				break
 			}
 			continue
 		}

@@ -58,10 +58,10 @@ body {
 }
 
 /* Custom scrollbar */
-::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.18); border-radius: 99px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.3); }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.18); border-radius: 99px; transition: background 0.2s; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.35); }
 
 /* ── Accessibility / Focus ───────────────────────────────────── */
 :where(button, a, input, select, [role="button"]):focus-visible {
@@ -696,8 +696,9 @@ body {
 }
 
 .btn-primary:hover {
-    opacity: 0.9;
-    box-shadow: 0 6px 24px rgba(255,255,255,0.22);
+    opacity: 0.95;
+    transform: scale(1.05);
+    box-shadow: 0 0 20px rgba(255,255,255,0.4), 0 6px 24px rgba(255,255,255,0.22);
 }
 
 .btn-secondary {
@@ -842,7 +843,7 @@ body {
     width: 100%;
     border-radius: var(--radius-md);
     position: relative;
-    transition: transform 0.35s var(--ease-out), z-index 0s 0.35s;
+    transition: transform 0.35s var(--ease-out), box-shadow 0.35s var(--ease-out), z-index 0s 0.35s;
     z-index: 1;
     transform-origin: center center;
 }

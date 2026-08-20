@@ -56,6 +56,62 @@ type TMDBMovie struct {
 	ReleaseDate   string  `json:"release_date"`
 	FirstAirDate  string  `json:"first_air_date"`
 	GenreIDs      []int   `json:"genre_ids"`
+	MediaType     string  `json:"media_type,omitempty"`
+}
+
+func mapTMDBMovie(m TMDBMovie, defaultType string, categories []string) *Movie {
+	title := m.Title
+	if title == "" {
+		title = m.OriginalTitle
+	}
+	if title == "" {
+		title = m.Name
+	}
+
+	if title == "" || m.PosterPath == "" {
+		return nil
+	}
+
+	banner := ""
+	if m.BackdropPath != "" {
+		banner = "https://image.tmdb.org/t/p/original" + m.BackdropPath
+	} else {
+		banner = "https://image.tmdb.org/t/p/w1280" + m.PosterPath
+	}
+
+	thumbnail := "https://image.tmdb.org/t/p/w500" + m.PosterPath
+
+	var genres []string
+	for _, gid := range m.GenreIDs {
+		if name, ok := tmdbGenres[gid]; ok {
+			genres = append(genres, name)
+		}
+	}
+
+	year := ""
+	if m.ReleaseDate != "" && len(m.ReleaseDate) >= 4 {
+		year = m.ReleaseDate[:4]
+	} else if m.FirstAirDate != "" && len(m.FirstAirDate) >= 4 {
+		year = m.FirstAirDate[:4]
+	}
+	
+	mType := defaultType
+	if m.MediaType != "" {
+		mType = m.MediaType
+	}
+
+	return &Movie{
+		ID:          fmt.Sprintf("%d", m.ID),
+		Title:       title,
+		Description: m.Overview,
+		Banner:      banner,
+		Thumbnail:   thumbnail,
+		Categories:  categories,
+		Type:        mType,
+		Rating:      m.VoteAverage,
+		Year:        year,
+		Genres:      genres,
+	}
 }
 
 var tmdbGenres = map[int]string{
@@ -127,10 +183,6 @@ func loadConfig(path string) (mediaresolver.Config, error) {
 			}
 		case "BROWSER_EXECUTABLE":
 			cfg.BrowserExecutable = val
-		case "TARGET_ORIGIN":
-			// Deprecated alias for VIXSRC_ORIGIN — kept for backward compatibility.
-			log.Println("Warning: TARGET_ORIGIN is deprecated; use VIXSRC_ORIGIN instead")
-			cfg.TargetOrigin = cleanConfigValue(val)
 		case "VIXSRC_ORIGIN":
 			cfg.TargetOrigin = cleanConfigValue(val)
 		case "VIDKING_ORIGIN":
@@ -165,11 +217,6 @@ func loadConfig(path string) (mediaresolver.Config, error) {
 	}
 	if v := os.Getenv("BROWSER_EXECUTABLE"); v != "" {
 		cfg.BrowserExecutable = v
-	}
-	// TARGET_ORIGIN is the deprecated name for VIXSRC_ORIGIN.
-	if v := os.Getenv("TARGET_ORIGIN"); v != "" {
-		log.Println("Warning: TARGET_ORIGIN env var is deprecated; use VIXSRC_ORIGIN instead")
-		cfg.TargetOrigin = v
 	}
 	if v := os.Getenv("VIXSRC_ORIGIN"); v != "" {
 		cfg.TargetOrigin = v
@@ -263,53 +310,10 @@ func fetchTMDB(endpoint string, categories []string, mediaType string) []Movie {
 
 	var movies []Movie
 	for _, m := range tmdbRes.Results {
-		title := m.Title
-		if title == "" {
-			title = m.OriginalTitle
+		mapped := mapTMDBMovie(m, mediaType, categories)
+		if mapped != nil {
+			movies = append(movies, *mapped)
 		}
-		if title == "" {
-			title = m.Name
-		}
-
-		if title == "" || m.PosterPath == "" {
-			continue
-		}
-
-		banner := ""
-		if m.BackdropPath != "" {
-			banner = "https://image.tmdb.org/t/p/original" + m.BackdropPath
-		} else {
-			banner = "https://image.tmdb.org/t/p/w1280" + m.PosterPath
-		}
-
-		thumbnail := "https://image.tmdb.org/t/p/w500" + m.PosterPath
-
-		var genres []string
-		for _, gid := range m.GenreIDs {
-			if name, ok := tmdbGenres[gid]; ok {
-				genres = append(genres, name)
-			}
-		}
-
-		year := ""
-		if m.ReleaseDate != "" && len(m.ReleaseDate) >= 4 {
-			year = m.ReleaseDate[:4]
-		} else if m.FirstAirDate != "" && len(m.FirstAirDate) >= 4 {
-			year = m.FirstAirDate[:4]
-		}
-
-		movies = append(movies, Movie{
-			ID:          fmt.Sprintf("%d", m.ID),
-			Title:       title,
-			Description: m.Overview,
-			Banner:      banner,
-			Thumbnail:   thumbnail,
-			Categories:  categories,
-			Type:        mediaType,
-			Rating:      m.VoteAverage,
-			Year:        year,
-			Genres:      genres,
-		})
 	}
 
 	log.Printf("Fetched %d items for %v (%s)\n", len(movies), categories, mediaType)
@@ -763,72 +767,22 @@ func fetchMultiSearch(encodedQuery string) []Movie {
 		return nil
 	}
 
-	// multi search returns a "media_type" field per result
-	var raw struct {
-		Results []struct {
-			ID           int     `json:"id"`
-			Title        string  `json:"title"`
-			Name         string  `json:"name"`
-			Overview     string  `json:"overview"`
-			BackdropPath string  `json:"backdrop_path"`
-			PosterPath   string  `json:"poster_path"`
-			MediaType    string  `json:"media_type"`
-			VoteAverage  float64 `json:"vote_average"`
-			ReleaseDate  string  `json:"release_date"`
-			FirstAirDate string  `json:"first_air_date"`
-			GenreIDs     []int   `json:"genre_ids"`
-		} `json:"results"`
-	}
+	var raw TMDBResponse
 
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil
 	}
 
 	var movies []Movie
+	categories := []string{"Search Results"}
 	for _, m := range raw.Results {
 		if m.MediaType != "movie" && m.MediaType != "tv" {
 			continue
 		}
-		title := m.Title
-		if title == "" {
-			title = m.Name
+		mapped := mapTMDBMovie(m, m.MediaType, categories)
+		if mapped != nil {
+			movies = append(movies, *mapped)
 		}
-		if title == "" || m.PosterPath == "" {
-			continue
-		}
-		banner := ""
-		if m.BackdropPath != "" {
-			banner = "https://image.tmdb.org/t/p/original" + m.BackdropPath
-		} else {
-			banner = "https://image.tmdb.org/t/p/w1280" + m.PosterPath
-		}
-
-		var genres []string
-		for _, gid := range m.GenreIDs {
-			if name, ok := tmdbGenres[gid]; ok {
-				genres = append(genres, name)
-			}
-		}
-
-		year := ""
-		if m.ReleaseDate != "" && len(m.ReleaseDate) >= 4 {
-			year = m.ReleaseDate[:4]
-		} else if m.FirstAirDate != "" && len(m.FirstAirDate) >= 4 {
-			year = m.FirstAirDate[:4]
-		}
-
-		movies = append(movies, Movie{
-			ID:          fmt.Sprintf("%d", m.ID),
-			Title:       title,
-			Description: m.Overview,
-			Banner:      banner,
-			Thumbnail:   "https://image.tmdb.org/t/p/w500" + m.PosterPath,
-			Categories:  []string{"Search Results"},
-			Type:        m.MediaType,
-			Rating:      m.VoteAverage,
-			Year:        year,
-			Genres:      genres,
-		})
 	}
 	return movies
 }
@@ -855,15 +809,6 @@ func detailHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// addParam appends a query parameter to a URL, using "?" or "&" as appropriate.
-	// Named addParam to avoid shadowing the built-in append.
-	addParam := func(base, extra string) string {
-		if strings.Contains(base, "?") {
-			return base + "&" + extra
-		}
-		return base + "?" + extra
-	}
-
 	var endpoint string
 	if mediaType == "movie" {
 		endpoint = fmt.Sprintf("/movie/%s", id)
@@ -872,10 +817,18 @@ func detailHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rawURL := buildURL(endpoint)
-	rawURL = addParam(rawURL, "append_to_response=credits,videos,recommendations")
-	rawURL = addParam(rawURL, "language=en-US")
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{}`))
+		return
+	}
+	q := u.Query()
+	q.Set("append_to_response", "credits,videos,recommendations")
+	q.Set("language", "en-US")
+	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequest("GET", rawURL, nil)
+	req, err := http.NewRequest("GET", u.String(), nil)
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte(`{}`))
