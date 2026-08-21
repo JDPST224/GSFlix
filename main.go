@@ -135,6 +135,7 @@ func loadConfig(path string) (mediaresolver.Config, error) {
 	cfg := mediaresolver.Config{
 		TargetOrigin:            "https://vixsrc.to",
 		VidKingOrigin:           "https://www.vidking.net",
+		VidLoveOrigin:           "https://player.vidlove.cc",
 		BrowserHeadless:         true,
 		BrowserTimeout:          45 * time.Second,
 		SourceResolutionTimeout: 20 * time.Second,
@@ -187,6 +188,8 @@ func loadConfig(path string) (mediaresolver.Config, error) {
 			cfg.TargetOrigin = cleanConfigValue(val)
 		case "VIDKING_ORIGIN":
 			cfg.VidKingOrigin = cleanConfigValue(val)
+		case "VIDLOVE_ORIGIN":
+			cfg.VidLoveOrigin = cleanConfigValue(val)
 		}
 	}
 
@@ -223,6 +226,9 @@ func loadConfig(path string) (mediaresolver.Config, error) {
 	}
 	if v := os.Getenv("VIDKING_ORIGIN"); v != "" {
 		cfg.VidKingOrigin = v
+	}
+	if v := os.Getenv("VIDLOVE_ORIGIN"); v != "" {
+		cfg.VidLoveOrigin = v
 	}
 
 	// Environment variables are explicit runtime overrides. Only override
@@ -432,8 +438,15 @@ func updatePopularCache() {
 
 // ── Dynamic media source resolver ───────────────────────────────────────────
 func mediaMovieSourceHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodOptions)
 		writeMediaError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
@@ -452,8 +465,15 @@ func mediaMovieSourceHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func mediaTVSourceHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodOptions)
 		writeMediaError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
@@ -473,8 +493,15 @@ func mediaTVSourceHandler(w http.ResponseWriter, r *http.Request) {
 
 func mediaProviderMovieSourceHandler(provider string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", http.MethodGet)
+			w.Header().Set("Allow", http.MethodGet+", "+http.MethodOptions)
 			writeMediaError(w, http.StatusMethodNotAllowed, "Method not allowed")
 			return
 		}
@@ -495,8 +522,15 @@ func mediaProviderMovieSourceHandler(provider string) http.HandlerFunc {
 
 func mediaProviderTVSourceHandler(provider string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "*")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		if r.Method != http.MethodGet {
-			w.Header().Set("Allow", http.MethodGet)
+			w.Header().Set("Allow", http.MethodGet+", "+http.MethodOptions)
 			writeMediaError(w, http.StatusMethodNotAllowed, "Method not allowed")
 			return
 		}
@@ -518,8 +552,15 @@ func mediaProviderTVSourceHandler(provider string) http.HandlerFunc {
 
 func mediaProxyHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "*")
+	w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Range, Accept-Ranges")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		w.Header().Set("Allow", http.MethodGet+", "+http.MethodHead)
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodHead+", "+http.MethodOptions)
 		writeMediaError(w, http.StatusMethodNotAllowed, "Method not allowed")
 		return
 	}
@@ -569,6 +610,12 @@ func moviesHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	cacheMutex.RLock()
 	movies := cachedMovies
 	cacheMutex.RUnlock()
@@ -582,6 +629,12 @@ func tvShowsHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	tvMutex.RLock()
 	shows := cachedTVShows
 	tvMutex.RUnlock()
@@ -595,6 +648,12 @@ func popularHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	popularMutex.RLock()
 	pop := cachedPopular
 	popularMutex.RUnlock()
@@ -608,6 +667,12 @@ func homeHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 
 	cacheMutex.RLock()
 	movies := cachedMovies
@@ -701,6 +766,12 @@ func searchHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 
 	if tmdbToken == "" && tmdbAPIKey == "" {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -793,6 +864,12 @@ func detailHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 
 	if tmdbToken == "" && tmdbAPIKey == "" {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -824,7 +901,7 @@ func detailHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := u.Query()
-	q.Set("append_to_response", "credits,videos,recommendations")
+	q.Set("append_to_response", "credits,videos,recommendations,external_ids")
 	q.Set("language", "en-US")
 	u.RawQuery = q.Encode()
 
@@ -862,12 +939,511 @@ func detailHandler(w http.ResponseWriter, r *http.Request) {
 	w.Write(body)
 }
 
+// ── Subtitle Handlers (VidKing / Videasy) ────────────────────────────────────
+
+// videasySubtitle represents a single subtitle entry from the Videasy search API.
+type videasySubtitle struct {
+	ID               string `json:"id"`
+	Display          string `json:"display"`
+	Language         string `json:"language"`
+	Format           string `json:"format"`
+	IsHearingImpaired bool   `json:"isHearingImpaired"`
+}
+
+// videasySearchResponse is the top-level envelope returned by
+// https://subs.videasy.to/search?id=<imdb-id>.
+// The API may return either an array directly or a wrapper object — we handle
+// the array form here (the most common one observed).
+type videasySearchResponse []videasySubtitle
+
+// frontendSubtitle is the shape we send back to the browser.
+type frontendSubtitle struct {
+	ID       string `json:"id"`
+	Label    string `json:"label"`
+	Language string `json:"language"`
+	URL      string `json:"url"`
+}
+
+// videasyHTTPClient is shared across all Videasy subtitle requests.
+var videasyHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
+// fetchIMDbID retrieves the IMDb ID for a movie or TV episode from TMDB.
+// For movies: /movie/{id}/external_ids
+// For TV episodes: /tv/{id}/season/{season}/episode/{episode}/external_ids
+func fetchIMDbID(mediaType, id, season, episode string) (string, error) {
+	var endpoint string
+	if mediaType == "movie" {
+		endpoint = fmt.Sprintf("/movie/%s/external_ids", id)
+	} else {
+		if season == "" || episode == "" {
+			return "", fmt.Errorf("season and episode required for TV")
+		}
+		endpoint = fmt.Sprintf("/tv/%s/season/%s/episode/%s/external_ids", id, season, episode)
+	}
+
+	rawURL := buildURL(endpoint)
+	req, err := http.NewRequest("GET", rawURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Add("accept", "application/json")
+	if tmdbToken != "" {
+		req.Header.Add("Authorization", "Bearer "+tmdbToken)
+	}
+	res, err := tmdbHTTPClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer res.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if err != nil {
+		return "", err
+	}
+	if res.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("TMDB external_ids %s: status %d", endpoint, res.StatusCode)
+	}
+	var ext struct {
+		IMDbID string `json:"imdb_id"`
+	}
+	if err := json.Unmarshal(body, &ext); err != nil {
+		return "", err
+	}
+	if ext.IMDbID == "" {
+		return "", fmt.Errorf("no IMDb ID found for %s %s", mediaType, id)
+	}
+	return ext.IMDbID, nil
+}
+
+// srtToWebVTT converts an SRT-formatted subtitle string to standard WebVTT.
+// It strips UTF-8 BOMs, replaces commas in timestamps with periods, and ensures
+// a valid WEBVTT header and clean line endings.
+func srtToWebVTT(srt string) string {
+	// Strip UTF-8 BOM and zero-width characters if present.
+	srt = strings.TrimPrefix(srt, "\xef\xbb\xbf")
+	srt = strings.TrimPrefix(srt, "\ufeff")
+
+	// Normalise line endings.
+	srt = strings.ReplaceAll(srt, "\r\n", "\n")
+	srt = strings.ReplaceAll(srt, "\r", "\n")
+	srt = strings.TrimSpace(srt)
+
+	// If already WebVTT, ensure clean formatting and return.
+	if strings.HasPrefix(srt, "WEBVTT") {
+		return srt + "\n"
+	}
+
+	var out strings.Builder
+	out.WriteString("WEBVTT\n\n")
+
+	lines := strings.Split(srt, "\n")
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		// Convert SRT timestamp lines: 00:00:01,000 --> 00:00:03,500
+		// to WebVTT:                   00:00:01.000 --> 00:00:03.500
+		if strings.Contains(trimmed, "-->") {
+			converted := strings.ReplaceAll(trimmed, ",", ".")
+			out.WriteString(converted)
+		} else {
+			out.WriteString(line)
+		}
+		out.WriteByte('\n')
+	}
+	return out.String()
+}
+
+// validSubtitleID checks that a Videasy subtitle ID contains only safe
+// characters (alphanumeric, hyphens, underscores) and is a reasonable length.
+func validSubtitleID(s string) bool {
+	if s == "" || len(s) > 128 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+func fetchVideasySubtitles(ctx context.Context, queryID string) []frontendSubtitle {
+	if queryID == "" {
+		return nil
+	}
+	searchURL := "https://subs.videasy.to/search?id=" + url.QueryEscape(queryID)
+	searchReq, err := http.NewRequestWithContext(ctx, "GET", searchURL, nil)
+	if err != nil {
+		return nil
+	}
+	searchReq.Header.Set("Accept", "application/json")
+	searchReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+
+	searchRes, err := videasyHTTPClient.Do(searchReq)
+	if err != nil {
+		log.Printf("[Subtitles] Videasy search error query=%s: %v", queryID, err)
+		return nil
+	}
+	defer searchRes.Body.Close()
+
+	if searchRes.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	searchBody, err := io.ReadAll(io.LimitReader(searchRes.Body, 2<<20))
+	if err != nil {
+		return nil
+	}
+
+	var videasyResults videasySearchResponse
+	if err := json.Unmarshal(searchBody, &videasyResults); err != nil {
+		return nil
+	}
+
+	result := make([]frontendSubtitle, 0, len(videasyResults))
+	for _, sub := range videasyResults {
+		if sub.ID == "" {
+			continue
+		}
+		label := sub.Display
+		if label == "" {
+			label = sub.Language
+		}
+		if sub.IsHearingImpaired {
+			label += " (HI)"
+		}
+		result = append(result, frontendSubtitle{
+			ID:       "videasy_" + sub.ID,
+			Label:    label,
+			Language: sub.Language,
+			URL:      "/api/subtitles/videasy/download/" + sub.ID,
+		})
+	}
+	return result
+}
+
+func fetchVidloveSubtitles(ctx context.Context, mediaType, id, season, episode string) []frontendSubtitle {
+	apiURL := "https://api.shows.st/" + mediaType + "?id=" + url.QueryEscape(id) + "&mode=json"
+	if mediaType == "tv" && season != "" && episode != "" {
+		apiURL += "&season=" + url.QueryEscape(season) + "&episode=" + url.QueryEscape(episode)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", apiURL, nil)
+	if err != nil {
+		return nil
+	}
+	req.Header.Set("Referer", "https://player.vidlove.cc/")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+
+	res, err := videasyHTTPClient.Do(req)
+	if err != nil {
+		log.Printf("[Subtitles] Vidlove search error id=%s: %v", id, err)
+		return nil
+	}
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	var apiRes struct {
+		Subtitles []struct {
+			File  string `json:"file"`
+			Label string `json:"label"`
+			Type  string `json:"type"`
+		} `json:"subtitles"`
+	}
+
+	if err := json.NewDecoder(io.LimitReader(res.Body, 2<<20)).Decode(&apiRes); err != nil {
+		return nil
+	}
+
+	result := make([]frontendSubtitle, 0, len(apiRes.Subtitles))
+	for i, sub := range apiRes.Subtitles {
+		if sub.File == "" {
+			continue
+		}
+		label := sub.Label
+		if label == "" {
+			label = "Unknown"
+		}
+		result = append(result, frontendSubtitle{
+			ID:       fmt.Sprintf("vidlove_%d", i),
+			Label:    label,
+			Language: label,
+			URL:      "/api/subtitles/vidlove/download?url=" + url.QueryEscape(sub.File),
+		})
+	}
+	return result
+}
+
+// subtitlesVidkingHandler resolves subtitles for the VidKing server.
+// It searches Videasy using TMDB ID directly, with automatic multi-query and cross-provider fallback.
+func subtitlesVidkingHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodOptions)
+		writeMediaError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	mediaType := strings.TrimSpace(r.URL.Query().Get("type"))
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	season := strings.TrimSpace(r.URL.Query().Get("season"))
+	episode := strings.TrimSpace(r.URL.Query().Get("episode"))
+
+	if !validMediaID(id) || (mediaType != "movie" && mediaType != "tv") {
+		writeMediaError(w, http.StatusBadRequest, "Invalid request parameters")
+		return
+	}
+	if mediaType == "tv" && (!validMediaID(season) || !validMediaID(episode)) {
+		writeMediaError(w, http.StatusBadRequest, "season and episode are required for TV")
+		return
+	}
+
+	// 1. Try Videasy with TMDB ID
+	subs := fetchVideasySubtitles(r.Context(), id)
+
+	// 2. If empty and TV, try with season/episode parameter
+	if len(subs) == 0 && mediaType == "tv" {
+		subs = fetchVideasySubtitles(r.Context(), id+"&season="+season+"&episode="+episode)
+	}
+
+	// 3. If still empty, try IMDb ID lookup as fallback
+	if len(subs) == 0 && (tmdbToken != "" || tmdbAPIKey != "") {
+		if imdbID, err := fetchIMDbID(mediaType, id, season, episode); err == nil && imdbID != "" {
+			subs = fetchVideasySubtitles(r.Context(), imdbID)
+			if len(subs) == 0 && mediaType == "tv" {
+				subs = fetchVideasySubtitles(r.Context(), imdbID+"&season="+season+"&episode="+episode)
+			}
+		}
+	}
+
+	// 4. If still empty, fallback to Vidlove API
+	if len(subs) == 0 {
+		subs = fetchVidloveSubtitles(r.Context(), mediaType, id, season, episode)
+	}
+
+	if subs == nil {
+		subs = []frontendSubtitle{}
+	}
+	log.Printf("[Subtitles] Vidking returned %d subtitles for id=%s", len(subs), id)
+	writeMediaJSON(w, http.StatusOK, map[string]any{"success": true, "subtitles": subs})
+}
+
+// subtitlesVideasyDownloadHandler proxies a subtitle download from Videasy and
+// converts SRT to WebVTT so the browser can use it as a native track source.
+//
+//	GET /api/subtitles/videasy/download/<subtitle-id>
+func subtitlesVideasyDownloadHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodOptions)
+		writeMediaError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	subtitleID := strings.TrimPrefix(r.URL.Path, "/api/subtitles/videasy/download/")
+	subtitleID = strings.Trim(subtitleID, "/")
+	if !validSubtitleID(subtitleID) {
+		writeMediaError(w, http.StatusBadRequest, "Invalid subtitle ID")
+		return
+	}
+
+	downloadURL := "https://subs.videasy.to/download?id=" + url.QueryEscape(subtitleID)
+	downReq, err := http.NewRequestWithContext(r.Context(), "GET", downloadURL, nil)
+	if err != nil {
+		writeMediaError(w, http.StatusInternalServerError, "Failed to build download request")
+		return
+	}
+	downReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+
+	downRes, err := videasyHTTPClient.Do(downReq)
+	if err != nil {
+		log.Printf("[Subtitles] Videasy download failed id=%s: %v", subtitleID, err)
+		writeMediaError(w, http.StatusBadGateway, "Subtitle download failed")
+		return
+	}
+	defer downRes.Body.Close()
+
+	if downRes.StatusCode != http.StatusOK {
+		log.Printf("[Subtitles] Videasy download non-200 id=%s status=%d", subtitleID, downRes.StatusCode)
+		writeMediaError(w, http.StatusBadGateway, "Subtitle not found")
+		return
+	}
+
+	// Cap download at 2 MB to prevent abuse.
+	const maxSubtitleBytes = 2 << 20
+	body, err := io.ReadAll(io.LimitReader(downRes.Body, maxSubtitleBytes+1))
+	if err != nil {
+		writeMediaError(w, http.StatusBadGateway, "Failed to read subtitle content")
+		return
+	}
+	if len(body) > maxSubtitleBytes {
+		writeMediaError(w, http.StatusBadGateway, "Subtitle file too large")
+		return
+	}
+
+	content := srtToWebVTT(string(body))
+
+	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
+	w.Header().Set("Cache-Control", "max-age=3600")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, content)
+}
+
+// subtitlesVidloveHandler resolves subtitles for the Vidlove server with Videasy fallback.
+//
+//	GET /api/subtitles/vidlove?type=movie&id=<tmdbId>
+//	GET /api/subtitles/vidlove?type=tv&id=<tmdbId>&season=<S>&episode=<E>
+func subtitlesVidloveHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodOptions)
+		writeMediaError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	mediaType := strings.TrimSpace(r.URL.Query().Get("type"))
+	id := strings.TrimSpace(r.URL.Query().Get("id"))
+	season := strings.TrimSpace(r.URL.Query().Get("season"))
+	episode := strings.TrimSpace(r.URL.Query().Get("episode"))
+
+	if !validMediaID(id) || (mediaType != "movie" && mediaType != "tv") {
+		writeMediaError(w, http.StatusBadRequest, "Invalid request parameters")
+		return
+	}
+	if mediaType == "tv" && (!validMediaID(season) || !validMediaID(episode)) {
+		writeMediaError(w, http.StatusBadRequest, "season and episode are required for TV")
+		return
+	}
+
+	subs := fetchVidloveSubtitles(r.Context(), mediaType, id, season, episode)
+	if len(subs) == 0 {
+		// Fallback to Videasy
+		subs = fetchVideasySubtitles(r.Context(), id)
+	}
+
+	if subs == nil {
+		subs = []frontendSubtitle{}
+	}
+	log.Printf("[Subtitles] Vidlove returned %d subtitles for id=%s", len(subs), id)
+	writeMediaJSON(w, http.StatusOK, map[string]any{"success": true, "subtitles": subs})
+}
+
+// subtitlesVidloveDownloadHandler proxies a subtitle download from Vidlove
+//
+//	GET /api/subtitles/vidlove/download?url=<url>
+func subtitlesVidloveDownloadHandler(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet+", "+http.MethodOptions)
+		writeMediaError(w, http.StatusMethodNotAllowed, "Method not allowed")
+		return
+	}
+
+	targetURL := r.URL.Query().Get("url")
+	if targetURL == "" {
+		writeMediaError(w, http.StatusBadRequest, "Missing url parameter")
+		return
+	}
+
+	parsed, err := url.Parse(targetURL)
+	if err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") {
+		writeMediaError(w, http.StatusBadRequest, "Invalid or unauthorized url")
+		return
+	}
+	host := strings.ToLower(parsed.Host)
+	if !strings.HasSuffix(host, "vdrk.site") && !strings.HasSuffix(host, "shows.st") && !strings.HasSuffix(host, "vidlove.cc") && !strings.HasSuffix(host, "videasy.to") {
+		writeMediaError(w, http.StatusBadRequest, "Invalid or unauthorized subtitle host")
+		return
+	}
+
+	downReq, err := http.NewRequestWithContext(r.Context(), "GET", targetURL, nil)
+	if err != nil {
+		writeMediaError(w, http.StatusInternalServerError, "Failed to build download request")
+		return
+	}
+	downReq.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+	downReq.Header.Set("Referer", "https://player.vidlove.cc/")
+
+	downRes, err := videasyHTTPClient.Do(downReq)
+	if err != nil {
+		log.Printf("[Subtitles] Vidlove download failed url=%s: %v", targetURL, err)
+		writeMediaError(w, http.StatusBadGateway, "Subtitle download failed")
+		return
+	}
+	defer downRes.Body.Close()
+
+	if downRes.StatusCode != http.StatusOK {
+		log.Printf("[Subtitles] Vidlove download non-200 url=%s status=%d", targetURL, downRes.StatusCode)
+		writeMediaError(w, http.StatusBadGateway, "Subtitle not found")
+		return
+	}
+
+	const maxSubtitleBytes = 2 << 20
+	body, err := io.ReadAll(io.LimitReader(downRes.Body, maxSubtitleBytes+1))
+	if err != nil {
+		writeMediaError(w, http.StatusBadGateway, "Failed to read subtitle content")
+		return
+	}
+	if len(body) > maxSubtitleBytes {
+		writeMediaError(w, http.StatusBadGateway, "Subtitle file too large")
+		return
+	}
+
+	content := string(body)
+	contentType := strings.ToLower(strings.TrimSpace(downRes.Header.Get("Content-Type")))
+
+	isSRT := !strings.Contains(strings.TrimSpace(content), "WEBVTT")
+	if strings.Contains(contentType, "srt") {
+		isSRT = true
+	}
+
+	if isSRT {
+		content = srtToWebVTT(content)
+	}
+
+	w.Header().Set("Content-Type", "text/vtt; charset=utf-8")
+	w.Header().Set("Cache-Control", "max-age=3600")
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.WriteString(w, content)
+}
+
 // ── Episodes Handler ─────────────────────────────────────────────────────────
 
 func episodesHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "*")
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 
 	if tmdbToken == "" && tmdbAPIKey == "" {
 		w.WriteHeader(http.StatusServiceUnavailable)
@@ -976,9 +1552,15 @@ func main() {
 	http.HandleFunc("/api/media/source/vixsrc/tv/", mediaProviderTVSourceHandler("vixsrc"))
 	http.HandleFunc("/api/media/source/vidking/movie/", mediaProviderMovieSourceHandler("vidking"))
 	http.HandleFunc("/api/media/source/vidking/tv/", mediaProviderTVSourceHandler("vidking"))
+	http.HandleFunc("/api/media/source/vidlove/movie/", mediaProviderMovieSourceHandler("vidlove"))
+	http.HandleFunc("/api/media/source/vidlove/tv/", mediaProviderTVSourceHandler("vidlove"))
 	http.HandleFunc("/api/media/source/movie/", mediaMovieSourceHandler)
 	http.HandleFunc("/api/media/source/tv/", mediaTVSourceHandler)
 	http.HandleFunc("/api/media/proxy/", mediaProxyHandler)
+	http.HandleFunc("/api/subtitles/vidking", subtitlesVidkingHandler)
+	http.HandleFunc("/api/subtitles/vidlove", subtitlesVidloveHandler)
+	http.HandleFunc("/api/subtitles/videasy/download/", subtitlesVideasyDownloadHandler)
+	http.HandleFunc("/api/subtitles/vidlove/download", subtitlesVidloveDownloadHandler)
 	http.Handle("/", http.FileServer(http.Dir("./static")))
 
 	server := &http.Server{

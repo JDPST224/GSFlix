@@ -146,6 +146,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let playerReady          = false;
     let playerAudioTracks    = [];
     let playerSubtitleTracks = [];
+    let externalSubtitleTracks = []; // Subtitles fetched from subs.external.to
     let playerAudioInitialized = false;
     let pendingResumePosition = 0;
     let lastSavedPlaybackSecond = 0;
@@ -1310,6 +1311,50 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    // ─── External Subtitle Fetching ────────────────────────────────────────────
+    // Fetches and aggregates external subtitles from all backend providers in parallel,
+    // deduplicating by language/label to guarantee maximum subtitle coverage.
+    async function fetchAllExternalSubtitles(movie, season, episode) {
+        if (!movie || !movie.id) return [];
+        const providers = ['vidking', 'vidlove'];
+        const promises = providers.map(async (provider) => {
+            try {
+                let endpoint;
+                if (movie.type === 'tv') {
+                    endpoint = `/api/subtitles/${provider}?type=tv&id=${encodeURIComponent(movie.id)}&season=${encodeURIComponent(season || 1)}&episode=${encodeURIComponent(episode || 1)}`;
+                } else {
+                    endpoint = `/api/subtitles/${provider}?type=movie&id=${encodeURIComponent(movie.id)}`;
+                }
+                const res = await fetch(endpoint, { method: 'GET', credentials: 'same-origin' });
+                if (!res.ok) return [];
+                const data = await res.json();
+                if (!data.success || !Array.isArray(data.subtitles)) return [];
+                return data.subtitles;
+            } catch (e) {
+                console.warn(`[Subtitles] Fetch from ${provider} failed:`, e);
+                return [];
+            }
+        });
+
+        const results = await Promise.allSettled(promises);
+        const combined = [];
+        const seen = new Set();
+
+        for (const res of results) {
+            if (res.status === 'fulfilled' && Array.isArray(res.value)) {
+                for (const sub of res.value) {
+                    if (!sub || !sub.url) continue;
+                    const key = `${(sub.language || '').toLowerCase().trim()}__${(sub.label || '').toLowerCase().trim()}`;
+                    if (!seen.has(key)) {
+                        seen.add(key);
+                        combined.push(sub);
+                    }
+                }
+            }
+        }
+        return combined;
+    }
+
     function normalizeTrackLabel(track, fallback, index) {
         const attrs = track?.attrs || {};
         return track?.name || track?.lang || attrs.NAME || attrs.LANGUAGE || fallback || `Track ${index + 1}`;
@@ -1340,6 +1385,29 @@ document.addEventListener('DOMContentLoaded', () => {
         if (english >= 0) return english;
         const preferred = tracks.findIndex(isDefaultTrack);
         return preferred >= 0 ? preferred : 0;
+    }
+
+    // chooseDefaultExternalSubtitleIndex picks the best External subtitle using
+    // the priority: English (non-HI) > English (HI) > first available.
+    function chooseDefaultExternalSubtitleIndex(subs) {
+        if (!subs || !subs.length) return -1;
+        // Prefer English non-HI.
+        const enNonHI = subs.findIndex(s => {
+            const lang = (s.language || '').toLowerCase();
+            const label = (s.label || '').toLowerCase();
+            const isEn = lang.startsWith('en') || label.includes('english');
+            return isEn && !label.includes('(hi)');
+        });
+        if (enNonHI >= 0) return enNonHI;
+        // Then English HI.
+        const enHI = subs.findIndex(s => {
+            const lang = (s.language || '').toLowerCase();
+            const label = (s.label || '').toLowerCase();
+            return (lang.startsWith('en') || label.includes('english')) && label.includes('(hi)');
+        });
+        if (enHI >= 0) return enHI;
+        // Fallback: first subtitle.
+        return 0;
     }
 
     function renderTrackMenu(menu, tracks, currentIndex, type) {
@@ -1388,30 +1456,108 @@ document.addEventListener('DOMContentLoaded', () => {
         });
     }
 
-    function syncPlayerSubtitleMenu(index) {
+    function syncPlayerSubtitleMenu(labelOrIndex) {
         if (!playerSubtitleCurrent) return;
-        const label = index >= 0 && playerSubtitleTracks[index]
-            ? normalizeTrackLabel(playerSubtitleTracks[index], 'Subtitles', index)
-            : 'Off';
+        // Accept both a plain label string and a numeric track index (legacy HLS path).
+        let label;
+        if (typeof labelOrIndex === 'string') {
+            label = labelOrIndex;
+        } else {
+            const index = labelOrIndex;
+            label = index >= 0 && playerSubtitleTracks[index]
+                ? normalizeTrackLabel(playerSubtitleTracks[index], 'Subtitles', index)
+                : 'Off';
+        }
         playerSubtitleCurrent.textContent = label;
         if (playerSubtitleTrigger) {
             playerSubtitleTrigger.title = `Subtitles: ${label}`;
             playerSubtitleTrigger.setAttribute('aria-label', `Subtitles, ${label}`);
         }
-        playerSubtitleMenu?.querySelectorAll('[data-track-index]').forEach(button => {
-            button.setAttribute('aria-selected', Number(button.dataset.trackIndex) === index ? 'true' : 'false');
-        });
     }
 
     function updatePlayerTrackMenus() {
         const audioIndex = vixHlsInstance ? vixHlsInstance.audioTrack : -1;
-        const subtitleIndex = vixHlsInstance ? vixHlsInstance.subtitleTrack : -1;
+        const hlsSubIndex = vixHlsInstance ? vixHlsInstance.subtitleTrack : -1;
+
+        // Build the audio menu as before.
         renderTrackMenu(playerAudioMenu, playerAudioTracks, audioIndex, 'audio');
-        renderTrackMenu(playerSubtitleMenu, playerSubtitleTracks, subtitleIndex, 'subtitle');
         syncPlayerAudioMenu(audioIndex);
-        syncPlayerSubtitleMenu(subtitleIndex);
         if (playerAudioPicker) playerAudioPicker.style.display = playerAudioTracks.length > 1 ? '' : 'none';
-        if (playerSubtitlePicker) playerSubtitlePicker.style.display = playerSubtitleTracks.length > 0 ? '' : 'none';
+
+        // Build a unified subtitle menu: External tracks first, then HLS tracks.
+        renderSubtitleTrackMenu(hlsSubIndex);
+    }
+
+    // Renders the subtitle picker with External tracks at the top and HLS.js
+    // subtitle tracks below, merging them into a single unified list.
+    function renderSubtitleTrackMenu(hlsSubIndex) {
+        if (!playerSubtitleMenu) return;
+        playerSubtitleMenu.innerHTML = '';
+
+        const hasExternal = externalSubtitleTracks.length > 0;
+        const hasHLS = playerSubtitleTracks.length > 0;
+
+        if (!hasExternal && !hasHLS) {
+            const empty = document.createElement('div');
+            empty.className = 'player-track-empty';
+            empty.textContent = 'No subtitles from this server';
+            playerSubtitleMenu.appendChild(empty);
+            if (playerSubtitlePicker) playerSubtitlePicker.style.display = 'none';
+            return;
+        }
+
+        // "Off" button.
+        const off = document.createElement('button');
+        off.type = 'button';
+        off.role = 'option';
+        off.dataset.trackIndex = '-1';
+        off.dataset.trackSource = 'off';
+        const isOff = hlsSubIndex < 0 && getActiveExternalIndex() === -1;
+        off.setAttribute('aria-selected', isOff ? 'true' : 'false');
+        off.innerHTML = '<span><strong>Off</strong></span><svg class="track-option-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>';
+        off.addEventListener('click', () => selectPlayerTrack('subtitle', -1));
+        playerSubtitleMenu.appendChild(off);
+
+        // External tracks.
+        externalSubtitleTracks.forEach((sub, index) => {
+            const activeIdx = getActiveExternalIndex();
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.role = 'option';
+            button.dataset.trackIndex = String(index);
+            button.dataset.trackSource = 'external';
+            const selected = activeIdx === index;
+            button.setAttribute('aria-selected', selected ? 'true' : 'false');
+            button.innerHTML = `<span><strong>${escapeHtml(sub.label || sub.language || `Subtitle ${index + 1}`)}</strong></span><svg class="track-option-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
+            button.addEventListener('click', () => selectPlayerTrack('external-subtitle', index));
+            playerSubtitleMenu.appendChild(button);
+        });
+
+        // HLS embedded subtitle tracks (if any, and if no External tracks are overriding).
+        if (hasHLS && !hasExternal) {
+            playerSubtitleTracks.forEach((track, index) => {
+                const button = document.createElement('button');
+                button.type = 'button';
+                button.role = 'option';
+                button.dataset.trackIndex = String(index);
+                button.dataset.trackSource = 'hls';
+                button.setAttribute('aria-selected', index === hlsSubIndex ? 'true' : 'false');
+                button.innerHTML = `<span><strong>${escapeHtml(normalizeTrackLabel(track, 'Subtitles', index))}</strong></span><svg class="track-option-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="20 6 9 17 4 12"></polyline></svg>`;
+                button.addEventListener('click', () => selectPlayerTrack('subtitle', index));
+                playerSubtitleMenu.appendChild(button);
+            });
+        }
+
+        // Update the current-label display.
+        const activeExternalIdx = getActiveExternalIndex();
+        let currentLabel = 'Off';
+        if (activeExternalIdx >= 0 && externalSubtitleTracks[activeExternalIdx]) {
+            currentLabel = externalSubtitleTracks[activeExternalIdx].label || externalSubtitleTracks[activeExternalIdx].language || 'Subtitle';
+        } else if (hlsSubIndex >= 0 && playerSubtitleTracks[hlsSubIndex]) {
+            currentLabel = normalizeTrackLabel(playerSubtitleTracks[hlsSubIndex], 'Subtitles', hlsSubIndex);
+        }
+        syncPlayerSubtitleMenu(currentLabel);
+        if (playerSubtitlePicker) playerSubtitlePicker.style.display = '';
     }
 
     function selectPlayerTrack(type, index) {
@@ -1419,9 +1565,21 @@ document.addEventListener('DOMContentLoaded', () => {
             vixHlsInstance.audioTrack = index;
             playerAudioInitialized = true;
             syncPlayerAudioMenu(index);
+        } else if (type === 'external-subtitle') {
+            // Activate a External <track> element and disable all others.
+            if (vixHlsInstance) vixHlsInstance.subtitleTrack = -1;
+            activateExternalTrack(index);
+            updatePlayerTrackMenus();
         } else if (type === 'subtitle' && vixHlsInstance) {
-            vixHlsInstance.subtitleTrack = index;
-            syncPlayerSubtitleMenu(index);
+            // Deactivate any External tracks, then enable the HLS one.
+            deactivateAllExternalTracks();
+            if (index >= 0) {
+                vixHlsInstance.subtitleTrack = index;
+            } else {
+                vixHlsInstance.subtitleTrack = -1;
+            }
+            updatePlayerTrackMenus();
+            syncPlayerSubtitleMenu('Off');
         }
         playerAudioPicker?.classList.remove('open');
         playerSubtitlePicker?.classList.remove('open');
@@ -1429,9 +1587,34 @@ document.addEventListener('DOMContentLoaded', () => {
         playerSubtitleTrigger?.setAttribute('aria-expanded', 'false');
     }
 
+    // Returns the index of the currently active External <track> element, or -1.
+    function getActiveExternalIndex() {
+        const tracks = vixPlayer.querySelectorAll('track[data-external]');
+        for (let i = 0; i < tracks.length; i++) {
+            if (tracks[i].track && tracks[i].track.mode === 'showing') return i;
+        }
+        return -1;
+    }
+
+    // Activates a single External track by index, disabling all others.
+    function activateExternalTrack(index) {
+        const tracks = vixPlayer.querySelectorAll('track[data-external]');
+        tracks.forEach((el, i) => {
+            if (el.track) el.track.mode = (i === index) ? 'showing' : 'disabled';
+        });
+    }
+
+    // Disables all External <track> elements.
+    function deactivateAllExternalTracks() {
+        vixPlayer.querySelectorAll('track[data-external]').forEach(el => {
+            if (el.track) el.track.mode = 'disabled';
+        });
+    }
+
     function resetPlayerTracks() {
         playerAudioTracks = [];
         playerSubtitleTracks = [];
+        externalSubtitleTracks = [];
         playerAudioInitialized = false;
         if (playerAudioMenu) playerAudioMenu.innerHTML = '';
         if (playerSubtitleMenu) playerSubtitleMenu.innerHTML = '';
@@ -1439,6 +1622,8 @@ document.addEventListener('DOMContentLoaded', () => {
         if (playerSubtitleCurrent) playerSubtitleCurrent.textContent = 'Off';
         if (playerAudioPicker) playerAudioPicker.style.display = 'none';
         if (playerSubtitlePicker) playerSubtitlePicker.style.display = 'none';
+        // Remove any injected External <track> elements.
+        vixPlayer.querySelectorAll('track[data-external]').forEach(t => t.remove());
     }
 
     async function launchPlayer(movie, season, episode) {
@@ -1503,8 +1688,11 @@ document.addEventListener('DOMContentLoaded', () => {
         vixPlayer.playbackRate = 1;
         vixPlayer.style.display = 'block';
 
+        // Fire External subtitle fetch in parallel with HLS source resolution across all providers
+        let externalPromise = fetchAllExternalSubtitles(movie, currentPlayerSeason, currentPlayerEpisode);
+
         try {
-            const provider = server === 'vidking' ? 'vidking' : 'vixsrc';
+            const provider = server === 'vidking' ? 'vidking' : (server === 'vidlove' ? 'vidlove' : 'vixsrc');
             const endpoint = movie.type === 'tv'
                 ? `/api/media/source/${provider}/tv/${encodeURIComponent(movie.id)}/${encodeURIComponent(currentPlayerSeason)}/${encodeURIComponent(currentPlayerEpisode)}`
                 : `/api/media/source/${provider}/movie/${encodeURIComponent(movie.id)}`;
@@ -1528,6 +1716,15 @@ document.addEventListener('DOMContentLoaded', () => {
             }
 
             await loadVixSource(data.url, requestId, provider);
+
+            // Apply External subtitles once the player is ready.
+            if (requestId !== playerRequestId) return;
+            const subs = await externalPromise;
+            if (requestId !== playerRequestId) return;
+            externalSubtitleTracks = Array.isArray(subs) ? subs : [];
+            if (externalSubtitleTracks.length > 0) {
+                applyExternalTracks();
+            }
         } catch (error) {
             if (requestId !== playerRequestId) return;
             console.error('[Player] Source resolution failed:', error);
@@ -1547,6 +1744,8 @@ document.addEventListener('DOMContentLoaded', () => {
         // empty source triggers a spurious browser media error.
         vixPlayer.onloadedmetadata = null;
         vixPlayer.onerror = null;
+        // Remove any injected External <track> elements.
+        vixPlayer.querySelectorAll('track[data-external]').forEach(t => t.remove());
     }
 
     function applyPlayerTracks(provider) {
@@ -1557,9 +1756,49 @@ document.addEventListener('DOMContentLoaded', () => {
             vixHlsInstance.audioTrack = chooseDefaultAudioIndex(playerAudioTracks);
             playerAudioInitialized = true;
         }
-        if (provider === 'vidking' && playerSubtitleTracks.length > 0 && vixHlsInstance.subtitleTrack < 0) {
-            vixHlsInstance.subtitleTrack = chooseDefaultSubtitleIndex(playerSubtitleTracks);
+        if (playerSubtitleTracks.length > 0 && vixHlsInstance.subtitleTrack < 0 && externalSubtitleTracks.length === 0) {
+            const defaultSub = chooseDefaultSubtitleIndex(playerSubtitleTracks);
+            if (defaultSub >= 0) {
+                vixHlsInstance.subtitleTrack = defaultSub;
+            }
         }
+        updatePlayerTrackMenus();
+    }
+
+    // Injects External subtitle tracks as <track> elements into the video element
+    // and re-renders the subtitle picker to include them alongside HLS tracks.
+    function applyExternalTracks() {
+        // Remove any previously injected External tracks.
+        vixPlayer.querySelectorAll('track[data-external]').forEach(t => t.remove());
+
+        const defaultIdx = chooseDefaultExternalSubtitleIndex(externalSubtitleTracks);
+
+        externalSubtitleTracks.forEach((sub, i) => {
+            const track = document.createElement('track');
+            track.kind = 'subtitles';
+            track.label = sub.label;
+            track.srclang = sub.language || '';
+            track.src = sub.url;
+            track.setAttribute('data-external', sub.id || String(i));
+            track.mode = (i === defaultIdx) ? 'showing' : 'disabled';
+            track.addEventListener('load', function() {
+                if (i === defaultIdx && track.track) {
+                    track.track.mode = 'showing';
+                }
+            });
+            vixPlayer.appendChild(track);
+        });
+
+        // Turn off any HLS.js-managed subtitle track so External takes priority.
+        if (vixHlsInstance && defaultIdx >= 0) {
+            vixHlsInstance.subtitleTrack = -1;
+        }
+
+        // Auto-select the best External subtitle track.
+        if (defaultIdx >= 0) {
+            activateExternalTrack(defaultIdx);
+        }
+
         updatePlayerTrackMenus();
     }
 
@@ -1627,9 +1866,20 @@ document.addEventListener('DOMContentLoaded', () => {
                     capLevelToPlayerSize: false,
                     renderTextTracksNatively: true,
                     autoStartLoad: true,
-                    // Start loading at the highest available level immediately.
-                    // HLS.js clamps this to the actual highest index, so 999 is safe.
                     startLevel: 999,
+                    // Buffer optimization for buffer-free 4K UHD & 1080p playback
+                    maxBufferLength: 90,
+                    maxMaxBufferLength: 180,
+                    maxBufferSize: 256 * 1024 * 1024,
+                    maxBufferHole: 0.5,
+                    highBufferWatchdogPeriod: 2,
+                    nudgeOffset: 0.1,
+                    nudgeMaxRetry: 5,
+                    fragLoadingTimeOut: 30000,
+                    fragLoadingMaxRetry: 6,
+                    fragLoadingRetryDelay: 500,
+                    backBufferLength: 60,
+                    progressive: true,
                     xhrSetup: function(xhr) {
                         xhr.withCredentials = false;
                     }
@@ -1637,30 +1887,27 @@ document.addEventListener('DOMContentLoaded', () => {
 
                 vixHlsInstance.on(Hls.Events.MANIFEST_PARSED, function(event, data) {
                     if (requestId !== playerRequestId) return;
-                    // Lock playback to the highest available bitrate level and
-                    // disable ABR so the player never steps down mid-stream.
-                    // capLevelToPlayerSize is already false so resolution is
-                    // not limited by the visible player dimensions.
+                    // Automatically lock playback to the highest available quality (4K 2160p, 1080p, or max bitrate).
                     if (data.levels && data.levels.length > 0) {
                         let highestLevelIndex = 0;
-                        let maxBitrate = 0;
+                        let maxScore = -1;
                         for (let i = 0; i < data.levels.length; i++) {
-                            if ((data.levels[i].bitrate || 0) > maxBitrate) {
-                                maxBitrate = data.levels[i].bitrate;
+                            const lvl = data.levels[i];
+                            const pixels = (lvl.width || 0) * (lvl.height || 0);
+                            const bitrate = lvl.bitrate || 0;
+                            const score = (pixels > 0 ? pixels * 1000 : 0) + bitrate;
+                            if (score > maxScore) {
+                                maxScore = score;
                                 highestLevelIndex = i;
                             }
                         }
-                        // Set all three level pointers so HLS.js has no path back to ABR.
+                        vixHlsInstance.startLevel = highestLevelIndex;
                         vixHlsInstance.currentLevel = highestLevelIndex;
                         vixHlsInstance.loadLevel   = highestLevelIndex;
                         vixHlsInstance.nextLevel   = highestLevelIndex;
                         vixHlsInstance.autoLevelEnabled = false;
                     }
                     applyPlayerTracks(provider);
-                    if (provider !== 'vidking') {
-                        vixHlsInstance.subtitleTrack = -1;
-                        updatePlayerTrackMenus();
-                    }
                 });
                 vixHlsInstance.on(Hls.Events.FRAG_BUFFERED, function() {
                     if (requestId !== playerRequestId) return;
@@ -1673,7 +1920,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 vixHlsInstance.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, function() {
                     if (requestId !== playerRequestId) return;
                     playerSubtitleTracks = vixHlsInstance.subtitleTracks || [];
-                    if (provider === 'vidking' && playerSubtitleTracks.length > 0 && vixHlsInstance.subtitleTrack < 0) {
+                    if (playerSubtitleTracks.length > 0 && vixHlsInstance.subtitleTrack < 0 && externalSubtitleTracks.length === 0) {
                         vixHlsInstance.subtitleTrack = chooseDefaultSubtitleIndex(playerSubtitleTracks);
                     }
                     updatePlayerTrackMenus();
@@ -1684,7 +1931,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 });
                 vixHlsInstance.on(Hls.Events.SUBTITLE_TRACK_SWITCH, function() {
                     if (requestId !== playerRequestId) return;
-                    syncPlayerSubtitleMenu(vixHlsInstance.subtitleTrack);
+                    updatePlayerTrackMenus();
                 });
                 vixHlsInstance.on(Hls.Events.ERROR, function(event, data) {
                     if (requestId !== playerRequestId || settled) return;
@@ -1692,11 +1939,11 @@ document.addEventListener('DOMContentLoaded', () => {
                     if (!data.fatal) return;
                     if (vixHlsInstance && !vixHlsInstance.__gsflixRecovered) {
                         vixHlsInstance.__gsflixRecovered = true;
-                        vixHlsInstance.startLevel = -1;
-                        vixHlsInstance.currentLevel = -1;
-                        vixHlsInstance.nextLevel = -1;
-                        vixHlsInstance.autoLevelEnabled = true;
-                        vixHlsInstance.recoverMediaError();
+                        if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
+                            vixHlsInstance.startLoad();
+                        } else {
+                            vixHlsInstance.recoverMediaError();
+                        }
                         tryStartPlayback();
                         return;
                     }
@@ -1707,8 +1954,7 @@ document.addEventListener('DOMContentLoaded', () => {
                     settleErr(new Error(detail));
                 });
 
-                // Reset recovery flag after successful playback resumes so a
-                // second fatal error later in the stream can also be recovered.
+                // Reset recovery flag after successful playback resumes.
                 vixHlsInstance.on(Hls.Events.FRAG_LOADED, function() {
                     if (vixHlsInstance && vixHlsInstance.__gsflixRecovered && !vixPlayer.paused) {
                         vixHlsInstance.__gsflixRecovered = false;
@@ -1793,7 +2039,16 @@ document.addEventListener('DOMContentLoaded', () => {
             syncServerPicker();
             playerServerPicker?.classList.remove('open');
             playerServerTrigger?.setAttribute('aria-expanded', 'false');
-            if (currentPlayerMovie) launchPlayer(currentPlayerMovie, currentPlayerSeason, currentPlayerEpisode);
+            if (currentPlayerMovie) {
+                if (vixPlayer && Number.isFinite(vixPlayer.currentTime) && vixPlayer.currentTime > 0) {
+                    saveProgress(currentPlayerMovie, currentPlayerSeason, currentPlayerEpisode, vixPlayer.currentTime);
+                    pendingResumePosition = vixPlayer.currentTime;
+                    vixPlayer.__resumeApplied = false;
+                }
+                const serverName = playerServerCurrent ? playerServerCurrent.textContent : 'server';
+                showToast(`Switching to ${serverName} (Highest Quality)...`);
+                launchPlayer(currentPlayerMovie, currentPlayerSeason, currentPlayerEpisode);
+            }
         });
     }
     function toggleTrackPicker(picker, trigger) {
@@ -2066,7 +2321,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function isHlsServer(server) {
         // Both available servers (vixsrc and vidking) use HLS. This helper is
         // kept for clarity and forward-compatibility if other server types are added.
-        return server === 'vixsrc' || server === 'vidking';
+        return server === 'vixsrc' || server === 'vidking' || server === 'vidlove';
     }
 
     function toggleVixPlay() {
