@@ -1312,47 +1312,42 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 
     // ─── External Subtitle Fetching ────────────────────────────────────────────
-    // Fetches and aggregates external subtitles from all backend providers in parallel,
-    // deduplicating by language/label to guarantee maximum subtitle coverage.
-    async function fetchAllExternalSubtitles(movie, season, episode) {
+    // Fetches external subtitles from the selected backend provider,
+    // deduplicating by language/label.
+    async function fetchExternalSubtitles(movie, season, episode, provider) {
         if (!movie || !movie.id) return [];
-        const providers = ['vidking', 'vidlove'];
-        const promises = providers.map(async (provider) => {
-            try {
-                let endpoint;
-                if (movie.type === 'tv') {
-                    endpoint = `/api/subtitles/${provider}?type=tv&id=${encodeURIComponent(movie.id)}&season=${encodeURIComponent(season || 1)}&episode=${encodeURIComponent(episode || 1)}`;
-                } else {
-                    endpoint = `/api/subtitles/${provider}?type=movie&id=${encodeURIComponent(movie.id)}`;
-                }
-                const res = await fetch(endpoint, { method: 'GET', credentials: 'same-origin' });
-                if (!res.ok) return [];
-                const data = await res.json();
-                if (!data.success || !Array.isArray(data.subtitles)) return [];
-                return data.subtitles;
-            } catch (e) {
-                console.warn(`[Subtitles] Fetch from ${provider} failed:`, e);
-                return [];
-            }
-        });
-
-        const results = await Promise.allSettled(promises);
-        const combined = [];
-        const seen = new Set();
-
-        for (const res of results) {
-            if (res.status === 'fulfilled' && Array.isArray(res.value)) {
-                for (const sub of res.value) {
-                    if (!sub || !sub.url) continue;
-                    const key = `${(sub.language || '').toLowerCase().trim()}__${(sub.label || '').toLowerCase().trim()}`;
-                    if (!seen.has(key)) {
-                        seen.add(key);
-                        combined.push(sub);
-                    }
-                }
-            }
+        const supportedProviders = ['vidking', 'vidlove'];
+        if (!supportedProviders.includes(provider)) {
+            return [];
         }
-        return combined;
+
+        try {
+            let endpoint;
+            if (movie.type === 'tv') {
+                endpoint = `/api/subtitles/${provider}?type=tv&id=${encodeURIComponent(movie.id)}&season=${encodeURIComponent(season || 1)}&episode=${encodeURIComponent(episode || 1)}`;
+            } else {
+                endpoint = `/api/subtitles/${provider}?type=movie&id=${encodeURIComponent(movie.id)}`;
+            }
+            const res = await fetch(endpoint, { method: 'GET', credentials: 'same-origin' });
+            if (!res.ok) return [];
+            const data = await res.json();
+            if (!data.success || !Array.isArray(data.subtitles)) return [];
+            
+            const combined = [];
+            const seen = new Set();
+            for (const sub of data.subtitles) {
+                if (!sub || !sub.url) continue;
+                const key = `${(sub.language || '').toLowerCase().trim()}__${(sub.label || '').toLowerCase().trim()}`;
+                if (!seen.has(key)) {
+                    seen.add(key);
+                    combined.push(sub);
+                }
+            }
+            return combined;
+        } catch (e) {
+            console.warn(`[Subtitles] Fetch from ${provider} failed:`, e);
+            return [];
+        }
     }
 
     function normalizeTrackLabel(track, fallback, index) {
@@ -1622,8 +1617,12 @@ document.addEventListener('DOMContentLoaded', () => {
         if (playerSubtitleCurrent) playerSubtitleCurrent.textContent = 'Off';
         if (playerAudioPicker) playerAudioPicker.style.display = 'none';
         if (playerSubtitlePicker) playerSubtitlePicker.style.display = 'none';
-        // Remove any injected External <track> elements.
-        vixPlayer.querySelectorAll('track[data-external]').forEach(t => t.remove());
+        
+        // Disable and remove all track elements to clear leftover subtitles
+        if (vixPlayer.textTracks) {
+            Array.from(vixPlayer.textTracks).forEach(t => t.mode = 'disabled');
+        }
+        vixPlayer.querySelectorAll('track').forEach(t => t.remove());
     }
 
     async function launchPlayer(movie, season, episode) {
@@ -1688,11 +1687,12 @@ document.addEventListener('DOMContentLoaded', () => {
         vixPlayer.playbackRate = 1;
         vixPlayer.style.display = 'block';
 
-        // Fire External subtitle fetch in parallel with HLS source resolution across all providers
-        let externalPromise = fetchAllExternalSubtitles(movie, currentPlayerSeason, currentPlayerEpisode);
+        const provider = server === 'vidking' ? 'vidking' : (server === 'vidlove' ? 'vidlove' : 'vixsrc');
+
+        // Fire External subtitle fetch in parallel with HLS source resolution for the selected provider
+        let externalPromise = fetchExternalSubtitles(movie, currentPlayerSeason, currentPlayerEpisode, provider);
 
         try {
-            const provider = server === 'vidking' ? 'vidking' : (server === 'vidlove' ? 'vidlove' : 'vixsrc');
             const endpoint = movie.type === 'tv'
                 ? `/api/media/source/${provider}/tv/${encodeURIComponent(movie.id)}/${encodeURIComponent(currentPlayerSeason)}/${encodeURIComponent(currentPlayerEpisode)}`
                 : `/api/media/source/${provider}/movie/${encodeURIComponent(movie.id)}`;
@@ -1744,8 +1744,11 @@ document.addEventListener('DOMContentLoaded', () => {
         // empty source triggers a spurious browser media error.
         vixPlayer.onloadedmetadata = null;
         vixPlayer.onerror = null;
-        // Remove any injected External <track> elements.
-        vixPlayer.querySelectorAll('track[data-external]').forEach(t => t.remove());
+        // Remove all <track> elements.
+        if (vixPlayer.textTracks) {
+            Array.from(vixPlayer.textTracks).forEach(t => t.mode = 'disabled');
+        }
+        vixPlayer.querySelectorAll('track').forEach(t => t.remove());
     }
 
     function applyPlayerTracks(provider) {
